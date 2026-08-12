@@ -90,12 +90,18 @@ def apply_rule_engine(
     if instruction_signals >= 2:
         return "F1", "F", "rule_1", None
 
-    # Rule 2: Dropper pattern (download + write + exec)
-    has_download = bool(net_caps)  # net-http-out or net-download-exec
+    # Rule 2: Dropper pattern (network + write + exec)
+    # Includes: download remote (net-http-out), reverse shell (net-socket-out),
+    # or script dropper (write embedded payload + execute)
+    has_net = bool(net_caps)  # any network capability
     has_write = bool(fs_caps.intersection({"fs-write", "fs-write-sensitive"}))
     has_exec = bool(proc_caps)
-    if has_download and has_write and has_exec:
+    if has_net and has_write and has_exec:
         return "C1", "C", "rule_2", "download-write-execute"
+    # Script dropper variant: write + execute without explicit network
+    # (payload embedded in code — still C1 dropper pattern)
+    if has_write and has_exec and ("instr-silent-exec" in A):
+        return "C1", "C", "rule_2", "script-dropper"
 
     # Rule 3: Credential theft motif (direct credential file/env reading)
     if cred_caps:

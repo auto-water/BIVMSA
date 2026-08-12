@@ -65,9 +65,9 @@ def detect_compound_flags(
     }
 
     # --- Exfiltration Chain ---
-    # fs-read → net-http-out (or net-socket-out) in any flow
+    # fs-read → net-* (any network outbound) in any flow
     fs_read_caps = {c for c in A if c.startswith("fs-read")}
-    net_out_caps = {c for c in A if c.startswith("net-http-out") or c.startswith("net-socket-out")}
+    net_out_caps = {c for c in A if c.startswith("net-")}
 
     # Check flows first
     for flow in flows:
@@ -85,8 +85,9 @@ def detect_compound_flags(
             flags["exfiltration_chain"] = True
 
     # --- RCE Chain ---
-    # net-http-out → fs-write → proc-exec (download→write→execute)
-    net_download = {c for c in A if c.startswith("net-download-exec") or c.startswith("net-http-out")}
+    # net-* → fs-write → proc-exec (download→write→execute, or script-dropper variant)
+    # Includes: net-http-out (download remote), net-socket-out (reverse shell), net-download-exec
+    net_download = {c for c in A if c.startswith("net-")}
     fs_write_caps = {c for c in A if c.startswith("fs-write")}
     proc_exec_caps = {c for c in A if c.startswith("proc-exec")}
 
