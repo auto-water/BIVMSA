@@ -34,21 +34,87 @@ log(`Starting BIV audit for: ${skillDir}`);
 // ---------------------------------------------------------------------------
 phase('Extract');
 
-// Step 1a: Run deterministic Python pipeline
+// Step 1a: Run deterministic Python pipeline (Φ(s) evidence via subagent)
 log('Running deterministic extraction...');
-const detOutput = await (async () => {
-  // Read the Python script and execute via Bash
-  const { stdout } = await (() => {
-    // Use the biv_audit.py script
-    return { stdout: '' }; // placeholder — we'll use Agent to run Python
-  })();
+const detEvidence = await (async () => {
+  try {
+    const raw = await agent(
+      `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences:
 
-  return stdout;
+python scripts/biv_audit.py ${skillDir} --evidence
+
+The output is a single JSON object. Output ONLY that JSON object.`,
+      { label: 'det-evidence' }
+    );
+    return parseJsonOutput(raw);
+  } catch (e) {
+    log(`Warning: deterministic pipeline failed: ${e}`);
+    return null;
+  }
 })();
 
-// For now, the deterministic Python output is obtained by running:
-// python scripts/biv_audit.py <skill_dir>
-// The Workflow agent reads the JSON output.
+if (detEvidence) {
+  log(`Deterministic: U=${(detEvidence.U || []).length}, compound=${JSON.stringify(detEvidence.compound_flags)}, rule=${detEvidence.rule_engine?.rule_id || 'none'}`);
+} else {
+  log('Warning: could not obtain deterministic evidence');
+}
+
+function parseJsonOutput(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let text = raw.trim();
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) text = fenceMatch[1].trim();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (e2) {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function fmtCapList(arr) {
+  return arr && arr.length ? arr.map(x => `  - ${x}`).join('\n') : '  (none)';
+}
+
+function fmtFlows(flows) {
+  if (!flows || !flows.length) return '  (no data flows detected)';
+  return flows.map(f => `  ${f.source} (${f.source_location}) -> ${f.sink} (${f.sink_location})`).join('\n');
+}
+
+function buildDetEvidenceText(det) {
+  if (!det) return '(deterministic pipeline failed or unavailable)';
+  const flagged = det.compound_flags
+    ? Object.entries(det.compound_flags).filter(([, v]) => v).map(([k]) => k)
+    : [];
+  return `### Declared Capabilities D(s) (deterministic):
+${fmtCapList(det.D_det)}
+### Actual Capabilities A(s) (AST + regex):
+${fmtCapList(det.A_merged)}
+### Undeclared Capabilities U(s) = A - D (HIDDEN POWERS):
+${fmtCapList(det.U)}
+### Overdeclared Capabilities O(s) = D - A (false claims):
+${fmtCapList(det.O)}
+### Data Flow Chains:
+${fmtFlows(det.flows)}
+### Compound Threat Flags (${flagged.length} triggered):
+  ${flagged.length ? flagged.map(f => `[!] ${f}`).join(' | ') : 'none triggered'}
+### Rule Engine:
+  ${det.rule_engine?.matched
+      ? `matched=${det.rule_engine.rule_id} -> intent=${det.rule_engine.intent_leaf} (kill_chain: ${det.rule_engine.kill_chain || 'none'})`
+      : 'no rule matched'}
+### Relaxed-Veto: ${det.relaxed_veto?.fired ? '[!] FIRED — ' + (det.relaxed_veto.reason || '') : 'not triggered'}
+### Finding Counts: ${JSON.stringify(det.finding_counts || {})}
+### Untrusted URLs: ${det.untrusted_url_count || 0}
+### Deterministic Verdict: ${JSON.stringify(det._det_verdict || {})}`;
+}
 
 // Read skill content directly for LLM prompts
 const skillMdPath = `${skillDir}/SKILL.md`;
@@ -196,26 +262,23 @@ log(`D_llm extracted: ${dLlmResult?.declared_capabilities?.length || 0} declared
 log(`A_llm_instr extracted: ${aLlmInstrResult?.instruction_capabilities?.length || 0} instruction-level capabilities`);
 
 // ---------------------------------------------------------------------------
-// Phase 2: Deviation Detection (Python computation)
+// Phase 2: Deviation Detection (computed by Python pipeline, already in detEvidence)
 // ---------------------------------------------------------------------------
 phase('Detect');
 
-log('Computing deviations and compound flags...');
-
-// For now, run the Python orchestrator to compute deviations
-// In a full implementation, we'd do the set operations in JS
-// The Python results are deterministic and fast
-
-log('Deviation detection complete. See final output for details.');
+log('Deviation detection computed by Python pipeline (see Deterministic Analysis Φ(s)).');
 
 // ---------------------------------------------------------------------------
 // Phase 3: Root Cause & Malicious Detection
 // ---------------------------------------------------------------------------
 phase('Classify');
 
-// Build the evidence summary for the LLM Judge
+// Build the evidence summary for the LLM Judge (deterministic Φ(s) + LLM extraction)
 const evidenceSummary = `
-## Declared Capabilities
+## Deterministic Analysis Φ(s) (from Python pipeline)
+${buildDetEvidenceText(detEvidence)}
+
+## Declared Capabilities (semantic extraction)
 ${(dLlmResult?.declared_capabilities || []).map(c => `- ${c.capability}: "${c.evidence.substring(0, 100)}"`).join('\n') || '(none)'}
 
 ## Instruction-Level Analysis
@@ -301,9 +364,11 @@ const finalResult = {
   intended_workflow: dLlmResult?.intended_workflow || '',
   judge_intent_category: judgeResult?.intent_category || 'H',
   judge_key_evidence: judgeResult?.key_evidence || [],
+  // Deterministic evidence passed through for traceability
+  deterministic_evidence: detEvidence || null,
   _meta: {
     timestamp: new Date().toISOString(),
-    workflow_version: '0.1.0',
+    workflow_version: '0.2.0',
   },
 };
 

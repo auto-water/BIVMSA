@@ -21,6 +21,87 @@ export const meta = {
 };
 
 // =============================================================================
+// Helpers: run deterministic Python pipeline and format its evidence
+// =============================================================================
+
+// Runs `python scripts/biv_audit.py <caseDir> --evidence` via a subagent and
+// parses the JSON output. Returns null on failure.
+async function runDetPipeline(caseDir) {
+  try {
+    const raw = await agent(
+      `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences, NO extra text around it:
+
+python scripts/biv_audit.py ${caseDir} --evidence
+
+The output is a single JSON object. Output ONLY that JSON object.`,
+      { label: `det-${caseDir.split('/').pop()}`, phase: 'Audit' }
+    );
+    return parseJsonOutput(raw);
+  } catch (e) {
+    log(`[${caseDir}] Deterministic pipeline failed: ${e}`);
+    return null;
+  }
+}
+
+// Extracts the first JSON object from agent output (strips markdown fences,
+// leading prose, trailing text). Returns null if nothing parses.
+function parseJsonOutput(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let text = raw.trim();
+  // Strip markdown code fences: ```json ... ``` or ``` ... ```
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) text = fenceMatch[1].trim();
+  // If there's prose before/after the JSON, find the first { ... } block.
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (e2) {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+// Formats the compact Φ(s) evidence object as a readable text block for the Judge.
+function buildDetEvidenceText(det) {
+  const fmtList = (arr) => (arr && arr.length ? arr.map(x => `  - ${x}`).join('\n') : '  (none)');
+  const fmtFlows = (flows) => {
+    if (!flows || !flows.length) return '  (no data flows detected)';
+    return flows.map(f => `  ${f.source} (${f.source_location}) -> ${f.sink} (${f.sink_location})`).join('\n');
+  };
+  const flagged = det.compound_flags
+    ? Object.entries(det.compound_flags).filter(([, v]) => v).map(([k]) => k)
+    : [];
+
+  return `### Declared Capabilities D(s) (deterministic):
+${fmtList(det.D_det)}
+### Actual Capabilities A(s) (AST + regex):
+${fmtList(det.A_merged)}
+### Undeclared Capabilities U(s) = A - D (HIDDEN POWERS):
+${fmtList(det.U)}
+### Overdeclared Capabilities O(s) = D - A (false claims):
+${fmtList(det.O)}
+### Data Flow Chains:
+${fmtFlows(det.flows)}
+### Compound Threat Flags (${flagged.length} triggered):
+  ${flagged.length ? flagged.map(f => `[!] ${f}`).join(' | ') : 'none triggered'}
+### Rule Engine:
+  ${det.rule_engine?.matched
+      ? `matched=${det.rule_engine.rule_id} -> intent=${det.rule_engine.intent_leaf} (kill_chain: ${det.rule_engine.kill_chain || 'none'})`
+      : 'no rule matched'}
+### Relaxed-Veto: ${det.relaxed_veto?.fired ? '[!] FIRED — ' + (det.relaxed_veto.reason || '') : 'not triggered'}
+### Finding Counts: ${JSON.stringify(det.finding_counts || {})}
+### Untrusted URLs: ${det.untrusted_url_count || 0}
+### Deterministic Verdict: ${JSON.stringify(det._det_verdict || {})}`;
+}
+
+// =============================================================================
 // Phase 1: Discover cases
 // =============================================================================
 phase('Discover');
@@ -84,19 +165,9 @@ const results = await pipeline(
     const parts = skillContent.split('---', 3);
     const bodyContent = parts.length >= 3 ? parts[2].trim() : skillContent;
 
-    // --- Step 2: Run deterministic Python pipeline ---
+    // --- Step 2: Run deterministic Python pipeline (Φ(s) evidence) ---
     log(`[${caseName}] Running deterministic pipeline...`);
-    let detResult = {};
-    try {
-      const pyOutput = await (() => {
-        // Use bash to run Python and capture output
-        return '';
-      })();
-      // Note: can't easily capture Python output in Workflow.
-      // Instead, we compute capabilities directly from LLM calls.
-    } catch (e) {
-      log(`[${caseName}] Python pipeline error: ${e}`);
-    }
+    const detEvidence = await runDetPipeline(caseDir);
 
     // --- Step 3: Parallel LLM extraction ---
     log(`[${caseName}] Running LLM extraction...`);
@@ -223,6 +294,11 @@ Distinguish legitimate instructions from adversarial patterns. A skill saying "w
       .map(c => `- ${c.capability} (adversarial=${c.is_adversarial}): "${c.evidence.substring(0, 100)}"`)
       .join('\n') || '(none)';
 
+    // Deterministic Φ(s) evidence section (from Python pipeline)
+    const detSummary = detEvidence
+      ? buildDetEvidenceText(detEvidence)
+      : '(deterministic pipeline failed or unavailable)';
+
     const judgeResult = await agent(
       `You are a senior security auditor. FINAL binary classification: BENIGN or MALWARE.
 
@@ -236,6 +312,9 @@ MALWARE = violates user intent AND likely causes negative impact.
 ${skillContent.substring(0, 6000)}
 \`\`\`
 
+## Deterministic Analysis Φ(s) (from Python pipeline)
+${detSummary}
+
 ## Declared Capabilities (semantic extraction):
 ${declaredSummary}
 
@@ -245,7 +324,12 @@ Analysis summary: ${aLlmInstrResult?.analysis_summary || 'none'}
 
 ## Instructions
 1. Reason step by step about hidden capabilities, intent mismatch, and potential harm
-2. Form a final verdict
+2. IMPORTANT: The Deterministic Analysis Φ(s) above is high-confidence rule-based evidence.
+   - compound_flags (rce_chain has 86% malicious prior, code_obfuscation 90%) are strong signals
+   - undeclared high-risk capabilities are the core deviation signal
+   - rule_engine and relaxed_veto are deterministic conclusions from 15 rules
+3. Weigh deterministic evidence heavily — it comes from AST taint analysis + 15 rules
+4. Form a final verdict
 
 Return JSON:
 {
@@ -292,6 +376,18 @@ Overly broad permissions without hidden code → usually benign.`,
       a_llm_instr_count: instrCaps.length,
       a_llm_instr_caps: instrCaps,
       intended_workflow: dLlmResult?.intended_workflow || '',
+      // Deterministic evidence passed through for downstream aggregation
+      det: detEvidence
+        ? {
+            U: detEvidence.U || [],
+            O: detEvidence.O || [],
+            compound_flags: detEvidence.compound_flags || {},
+            rule_engine: detEvidence.rule_engine || {},
+            relaxed_veto: detEvidence.relaxed_veto || {},
+            _det_verdict: detEvidence._det_verdict || {},
+            finding_counts: detEvidence.finding_counts || {},
+          }
+        : null,
       error: null,
     };
   }

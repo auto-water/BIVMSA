@@ -635,6 +635,69 @@ def _sanitize_frontmatter(fm: Optional[Dict]) -> Optional[Dict]:
 
 
 # =============================================================================
+# Deterministic Evidence (compact output for LLM workflows)
+# =============================================================================
+
+
+def build_det_evidence(skill_dir: str) -> Dict:
+    """Run the deterministic pipeline and return a COMPACT evidence object.
+
+    This is the interface used by LLM workflows (biv_workflow.js / batch_workflow.js)
+    to feed deterministic conclusions into the LLM Judge. It intentionally omits
+    the bulky fields (full skill content, LLM prompts, trace records) and keeps
+    only what the Judge needs to reason over Φ(s).
+
+    Returns dict with:
+    - skill_name, D_det, A_ast, A_regex, A_merged
+    - U (undeclared), O (overdeclared)
+    - flows (capped), flow_count
+    - compound_flags, rule_engine, relaxed_veto, _det_verdict
+    - finding_counts, untrusted_url_count
+    """
+    result = run_deterministic_pipeline(skill_dir)
+    if "error" in result:
+        return {"error": result["error"]}
+
+    p1 = result.get("phase1", {})
+    p2 = result.get("phase2", {})
+    p3 = result.get("phase3_deterministic", {})
+    det = result.get("_det_verdict", {})
+
+    flows = p1.get("flows_ast", [])
+    flows_capped = []
+    for f in flows[:10]:
+        flows_capped.append(
+            {
+                "source": f.get("source", ""),
+                "source_location": f.get("source_location", ""),
+                "sink": f.get("sink", ""),
+                "sink_location": f.get("sink_location", ""),
+            }
+        )
+
+    urls = p1.get("urls", {})
+
+    return {
+        "skill_name": p1.get("skill_name", "unknown"),
+        "D_det": p1.get("D_deterministic", []),
+        "A_ast": p1.get("A_ast", []),
+        "A_regex": p1.get("A_regex", []),
+        "A_merged": sorted(set(p1.get("A_ast", [])) | set(p1.get("A_regex", []))),
+        "U": p2.get("U", []),
+        "O": p2.get("O", []),
+        "flows": flows_capped,
+        "flow_count": len(flows),
+        "compound_flags": p2.get("compound_flags", {}),
+        "rule_engine": p3.get("rule_engine", {}),
+        "relaxed_veto": p3.get("relaxed_veto", {}),
+        "finding_counts": result.get("finding_counts", {}),
+        "untrusted_url_count": urls.get("untrusted_count", 0),
+        "untrusted_urls": [u.get("url", "") for u in urls.get("untrusted", [])[:5]],
+        "_det_verdict": det,
+    }
+
+
+# =============================================================================
 # CLI Entry Point
 # =============================================================================
 
