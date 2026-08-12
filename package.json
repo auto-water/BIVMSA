@@ -1,0 +1,13 @@
+{
+  "name": "biv-skill-audit",
+  "version": "0.1.0",
+  "description": "Behavioral Integrity Verification for AI Agent Skills",
+  "private": true,
+  "scripts": {
+    "audit": "python scripts/biv_audit.py",
+    "audit:jeremy": "python scripts/biv_audit.py experiment/cases/000-jeremy-content-consistency-validator__CI_B4 --output result.json",
+    "audit:ai-wrapper": "python scripts/biv_audit.py experiment/cases/ai-wrapper-product__CI_B6 --output result.json",
+    "audit:all": "npm run audit:jeremy && npm run audit:aiwrapper",
+    "test:smoke": "python -c \"import sys; sys.path.insert(0, 'src'); from src.biv.orchestrator import run_deterministic_pipeline; r = run_deterministic_pipeline('experiment/cases/000-jeremy-content-consistency-validator__CI_B4'); assert r['_det_verdict']['verdict'] == 'malware', 'jeremy failed'; print('PASS: jeremy'); r = run_deterministic_pipeline('experiment/cases/ai-wrapper-product__CI_B6'); assert r['_det_verdict']['verdict'] == 'malware', 'ai-wrapper failed'; print('PASS: ai-wrapper')\""
+  }
+}
