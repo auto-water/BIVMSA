@@ -1,0 +1,12 @@
+# Core
+pyyaml>=6.0
+
+# Multi-language AST parsing (taint analysis)
+tree-sitter>=0.21
+tree-sitter-javascript>=0.21
+tree-sitter-typescript>=0.21
+tree-sitter-bash>=0.21
+
+# LLM backend (OpenAI-compatible business endpoint)
+openai>=1.0
+python-dotenv>=1.0

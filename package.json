@@ -10,6 +10,9 @@
     "audit:all": "npm run audit:jeremy && npm run audit:aiwrapper",
     "batch": "python scripts/batch_audit.py --verbose",
     "batch:json": "python scripts/batch_audit.py --output batch-result.json",
+    "llm:single": "python scripts/batch_llm.py --single",
+    "llm:batch": "python scripts/batch_llm.py --verbose",
+    "llm:json": "python scripts/batch_llm.py --output batch-llm-result.json",
     "test:smoke": "python -c \"import sys; sys.path.insert(0, 'src'); from src.biv.orchestrator import run_deterministic_pipeline; r = run_deterministic_pipeline('experiment/cases/000-jeremy-content-consistency-validator__CI_B4'); assert r['_det_verdict']['verdict'] == 'malware', 'jeremy failed'; print('PASS: jeremy'); r = run_deterministic_pipeline('experiment/cases/ai-wrapper-product__CI_B6'); assert r['_det_verdict']['verdict'] == 'malware', 'ai-wrapper failed'; print('PASS: ai-wrapper')\""
   }
 }
