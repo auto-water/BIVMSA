@@ -70,68 +70,134 @@ flowchart TB
 
 ---
 
-## 二、时序图 - 完整审计流程
+## 一-b、双层运行架构
+
+系统分为两个运行层，通过 `--evidence` 精简证据接口打通：
+
+```mermaid
+flowchart TB
+    subgraph L1["运行层 1: Python 确定性管线<br/>(biv_audit.py / batch_audit.py)"]
+        direction TB
+        D1["Phase 1: 确定性能力提取<br/>D_det + A_ast + A_regex"]
+        D2["Phase 2: 偏差检测<br/>U/O + compound_flags"]
+        D3["Phase 3: 15条规则 + Relaxed-Veto"]
+        D1 --> D2 --> D3
+        D3 --> E["build_det_evidence()<br/>精简 Phi(s) 证据 JSON"]
+    end
+
+    subgraph L2["运行层 2: Claude Code Workflow<br/>(workflow JS, 子代理调度)"]
+        direction TB
+        W1["子代理: python --evidence<br/>获取确定性 Phi(s)"]
+        W2["子代理: D_llm<br/>LLM 语义声明提取"]
+        W3["子代理: A_llm_instr<br/>LLM 指令分析"]
+        W4["子代理: LLM Judge<br/>CoT + xhigh 裁决"]
+        W5["最终判定 verdict + confidence"]
+
+        W1 --> W4
+        W2 --> W4
+        W3 --> W4
+        W4 --> W5
+    end
+
+    E --> W1
+    E --> W4
+
+    style L1 fill:#e1f5fe
+    style L2 fill:#fce4ec
+    style E fill:#c8e6c9
+```
+
+**两层分工**：
+
+| 层 | 职责 | 产出 |
+|----|------|------|
+| Python 确定性层 | 静态分析、AST 污点、规则引擎、Relaxed-Veto | `Phi(s)` 精简证据 (纯确定性，无 LLM) |
+| Workflow LLM 层 | D_llm / A_llm_instr / LLM Judge | 最终 verdict (综合 Phi(s) + LLM 提取) |
+
+---
+
+## 二、时序图 - 完整审计流程 (Workflow 含 LLM)
 
 ```mermaid
 sequenceDiagram
     actor User as 用户/Auditor
-    participant CLI as biv_audit.py (Python 确定性管道)
-    participant WF as batch_workflow.js (Claude Code Workflow)
-    participant Agent as Claude Agent (LLM 调用)
-    participant Output as result.json
+    participant WF as workflow JS<br/>(编排器 batch_workflow.js)
+    participant DET as 子代理: python<br/>biv_audit.py --evidence
+    participant LLM as 子代理: D_llm + A_llm_instr<br/>(LLM 并行提取)
+    participant JUDGE as 子代理: LLM Judge<br/>(CoT + xhigh)
+    participant OUT as 审计结果输出
 
-    User->>CLI: npm run batch
-    CLI->>CLI: 扫描 experiment/cases/
+    User->>WF: Workflow({scriptPath: "batch_workflow.js"})
+    WF->>WF: 扫描 experiment/cases/ 发现所有 Skill
 
     loop 每个 Skill Case
-        CLI->>CLI: Phase 1: 读取 SKILL.md + scripts/
-
         rect rgb(225, 245, 254)
-            Note over CLI: Declared Track D(s)
-            CLI->>CLI: 解析 YAML frontmatter
-            CLI->>CLI: allowed-tools to taxonomy 映射
-            Note over CLI,Agent: D_llm: LLM 语义提取 (Workflow 中执行)
-            Agent-->>CLI: declared_capabilities + evidence
+            Note over WF,DET: 确定性管线 (Python 子代理)
+            WF->>DET: 运行 python biv_audit.py <case> --evidence
+            DET->>DET: Phase 1: 确定性能力提取<br/>D_det / A_ast / A_regex
+            DET->>DET: Phase 2: 偏差检测<br/>U / O / compound_flags
+            DET->>DET: Phase 3: 15条规则引擎 + Relaxed-Veto
+            DET-->>WF: 返回 Phi(s) 精简证据 JSON
         end
 
         rect rgb(225, 245, 254)
-            Note over CLI: Actual Track A(s)
-            CLI->>CLI: Python AST 污点分析 (TaintTracker)
-            CLI->>CLI: JS/TS tree-sitter 分析 (JSTaintAnalyzer)
-            CLI->>CLI: Shell tree-sitter 分析 (ShellTaintAnalyzer)
-            CLI->>CLI: Regex 模式 to capability 映射
-            Note over CLI,Agent: A_llm_instr: 指令隐藏能力检测 (Workflow 中执行)
-            Agent-->>CLI: instruction_capabilities + is_adversarial
-        end
-
-        rect rgb(255, 243, 224)
-            Note over CLI: Phase 2: 偏差检测
-            CLI->>CLI: U = A - D (未声明能力)
-            CLI->>CLI: O = D - A (过度声明)
-            CLI->>CLI: 检测 4 个 compound flags
-            CLI->>CLI: 组装 Phi(s) 证据元组
+            Note over WF,LLM: LLM 能力提取 (并行)
+            par D_llm: 语义声明能力提取
+                WF->>LLM: 声明能力提取 (taxonomy + body)
+                LLM-->>WF: declared_capabilities + evidence
+            and A_llm_instr: 指令隐藏能力检测
+                WF->>LLM: 指令级能力检测 (instr-*)
+                LLM-->>WF: instruction_capabilities + is_adversarial
+            end
         end
 
         rect rgb(252, 228, 236)
-            Note over CLI: Phase 3: 根因分类
-            CLI->>CLI: 15条规则引擎 (first-match-wins)
-            alt 规则命中
-                CLI->>CLI: 直接分类 to intent_leaf
-            else 规则未命中 (~1/3)
-                Note over CLI,Agent: LLM Classifier 联合推理
-                Agent-->>CLI: intent_leaf + kill_chain
-            end
-
-            Note over CLI: Phase 3: 恶意判定
-            CLI->>CLI: Relaxed-Veto 检查
-            Note over CLI,Agent: LLM Judge (CoT + xhigh)
-            Agent-->>CLI: verdict + confidence + reasoning
-            CLI->>CLI: y_hat = veto OR judge to 最终判定
+            Note over WF,JUDGE: 恶意判定
+            WF->>JUDGE: LLM Judge<br/>(Phi(s) 证据 + LLM 提取 + 原始内容)
+            JUDGE->>JUDGE: CoT + xhigh 综合推理<br/>权衡确定性证据权重
+            JUDGE-->>WF: verdict + confidence + reasoning
         end
     end
 
-    CLI->>Output: 汇总 JSON
-    Output-->>User: verdict + evidence + trace
+    WF->>OUT: 汇总所有 case 审计结果
+    OUT-->>User: verdict + evidence chain + match summary
+```
+
+---
+
+## 二-b、确定性流水线时序 (无 LLM, Python CLI)
+
+```mermaid
+sequenceDiagram
+    actor User as 用户/Auditor
+    participant CLI as biv_audit.py / batch_audit.py
+    participant P1 as Phase 1 能力提取
+    participant P2 as Phase 2 偏差检测
+    participant P3 as Phase 3 规则+判定
+    participant OUT as result.json
+
+    User->>CLI: npm run batch (或 python batch_audit.py)
+    CLI->>CLI: 扫描 experiment/cases/
+
+    loop 每个 Skill Case
+        CLI->>P1: 读取 SKILL.md + scripts/
+        P1->>P1: D_det (frontmatter to taxonomy)
+        P1->>P1: A_ast (AST 污点分析)
+        P1->>P1: A_regex (规则引擎)
+        P1-->>P2: D(s) + A(s) + flow(s)
+
+        P2->>P2: U = A - D (未声明能力)
+        P2->>P2: O = D - A (过度声明)
+        P2->>P2: 4 个 compound flags
+        P2-->>P3: Phi(s) 证据元组
+
+        P3->>P3: 15条规则引擎 (first-match-wins)
+        P3->>P3: Relaxed-Veto 检查
+        P3-->>CLI: _det_verdict (确定性判定)
+    end
+
+    CLI->>OUT: 汇总 JSON + trace
+    OUT-->>User: verdict + evidence + trace summary
 ```
 
 ---
@@ -394,6 +460,7 @@ MAS4MalSkill/
 │   ├── root_cause.py               # Module 4: 15条规则引擎 + LLM 分类器
 │   ├── malicious_detect.py         # Module 5: Relaxed-Veto + LLM Judge
 │   └── orchestrator.py             # 3-Phase 编排器 + JSON 输出 + CLI
+│                                    #   + build_det_evidence() (精简 Phi(s))
 │
 ├── scripts/
 │   ├── biv_audit.py                # 单 skill 审计 CLI

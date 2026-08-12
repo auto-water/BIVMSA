@@ -80,12 +80,12 @@ MAS4MalSkill/
 │   ├── deviation.py          # Module 3: 偏差检测 + compound flags
 │   ├── root_cause.py         # Module 4: 15条规则 + LLM 分类器
 │   ├── malicious_detect.py   # Module 5: Relaxed-Veto + LLM Judge
-│   └── orchestrator.py       # 三阶段编排器 + CLI
+│   └── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
 ├── scripts/
-│   ├── biv_audit.py          # 单 skill 审计
+│   ├── biv_audit.py          # 单 skill 审计 (--evidence 精简模式)
 │   ├── batch_audit.py        # 批量确定性审计
-│   ├── biv_workflow.js       # LLM 单 case 审计
-│   └── batch_workflow.js     # LLM 批量审计
+│   ├── biv_workflow.js       # LLM 单 case 审计 (打通确定性证据)
+│   └── batch_workflow.js     # LLM 批量审计 (打通确定性证据)
 └── experiment/cases/         # 测试用例
 ```
 
@@ -240,15 +240,20 @@ experiment/cases/
 ### 5.1 单 skill 审计 (确定性，无 LLM)
 
 ```bash
-# 输出 JSON 到控制台
+# 完整确定性结果 (phases + trace + LLM prompts)
 python scripts/biv_audit.py <skill-directory>
 
 # 输出 JSON 到文件
 python scripts/biv_audit.py <skill-directory> --output result.json
 
+# 精简 Phi(s) 证据 (供 LLM Workflow 消费)
+python scripts/biv_audit.py <skill-directory> --evidence
+
 # 或通过 npm
 npm run audit:jeremy
 ```
+
+`--evidence` 模式输出紧凑的确定性结论（D/U/O、compound_flags、rule_engine、relaxed_veto、_det_verdict），是 Workflow 脚本调用 Python 管线的接口。
 
 ### 5.2 批量审计 (确定性)
 
@@ -265,7 +270,7 @@ python scripts/batch_audit.py --verbose
 
 ### 5.3 完整含 LLM 审计 (Claude Code)
 
-LLM 调用必须运行在 Claude Code 运行时内：
+LLM 调用必须运行在 Claude Code 运行时内。Workflow 脚本通过**子代理调用 Python 确定性管线**获取 `Phi(s)` 精简证据，再注入 LLM Judge：
 
 ```
 # 单 case
@@ -274,6 +279,22 @@ Workflow({scriptPath: "scripts/biv_workflow.js", args: {skill_dir: "..."}})
 # 批量
 Workflow({scriptPath: "scripts/batch_workflow.js"})
 ```
+
+**每个 case 的 LLM 调用链**：
+
+```
+Workflow JS (编排器)
+  ├─ 子代理 → python scripts/biv_audit.py <case> --evidence
+  │           → 返回 Phi(s) 精简证据 (D/U/O + compound_flags
+  │             + rule_engine + relaxed_veto + _det_verdict)
+  ├─ 子代理 → D_llm 语义声明能力提取 (并行)
+  ├─ 子代理 → A_llm_instr 指令隐藏能力检测 (并行)
+  └─ 子代理 → LLM Judge (CoT + xhigh)
+              ├─ 输入: Phi(s) 证据 + LLM 提取结果 + 原始内容
+              └─ 输出: verdict + confidence + reasoning
+```
+
+Judge 的 prompt 明确要求"**Weigh deterministic evidence heavily**"——compound flags（rce_chain 恶意先验 86%）、未声明高风险能力、规则引擎结论是强信号。
 
 ### 5.4 冒烟测试
 
