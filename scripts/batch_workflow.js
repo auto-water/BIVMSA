@@ -66,7 +66,12 @@ const results = await pipeline(
       { label: `read-${caseName}` }
     );
 
-    if (!skillContent || skillContent.includes('Error')) {
+    // Detect read failure by content shape, not keyword: a successful read of a
+    // SKILL.md always starts with YAML frontmatter ("---"). Genuine read errors
+    // (file missing / permission denied / tool error) won't start with "---",
+    // while skill bodies may legitimately contain the word "Error" (e.g. error
+    // handling tables, `throw new Error(...)` in embedded code).
+    if (!skillContent || !skillContent.trim().startsWith('---')) {
       log(`[${caseName}] ERROR: Cannot read SKILL.md`);
       return { case: caseName, error: 'Cannot read SKILL.md' };
     }
