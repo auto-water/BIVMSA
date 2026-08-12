@@ -13,6 +13,7 @@ as interfaces here — the Workflow script invokes them via Claude Code Agent to
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -63,6 +64,7 @@ from .malicious_detect import (
     validate_judge_output,
     final_verdict,
 )
+from .trace import TraceContext
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,7 @@ logger = logging.getLogger(__name__)
 
 def phase1_extract_capabilities(
     skill_dir: Path,
+    trace: Optional[TraceContext] = None,
 ) -> Dict:
     """Run Phase 1: extract D(s), A(s), flow(s), compound(s).
 
@@ -86,33 +89,59 @@ def phase1_extract_capabilities(
     - llm_prompts (prompts ready for Workflow Agent calls)
     - intermediate data for Phase 2
     """
+    if trace:
+        trace.phase("extract")
+
     from datetime import datetime
 
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
-        return {"error": f"No SKILL.md found in {skill_dir}"}
+        msg = f"No SKILL.md found in {skill_dir}"
+        if trace:
+            trace.error(msg)
+        return {"error": msg}
 
     try:
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        return {"error": f"Cannot read SKILL.md: {e}"}
+        msg = f"Cannot read SKILL.md: {e}"
+        if trace:
+            trace.error(msg)
+        return {"error": msg}
 
     # Parse frontmatter and body
+    t0 = time.time()
     frontmatter, body = parse_frontmatter(content)
+    if trace:
+        trace.step("parse_frontmatter", message="Parsed SKILL.md frontmatter",
+                   input_data={"path": str(skill_md)},
+                   output_data={"has_frontmatter": frontmatter is not None, "body_len": len(body)},
+                   duration_ms=(time.time() - t0) * 1000)
 
     # --- Declared Track: Deterministic ---
+    t0 = time.time()
     if frontmatter:
         D_det, d_det_evidence = extract_declared_deterministic(
             skill_dir, frontmatter, content
         )
     else:
         D_det, d_det_evidence = set(), []
+        if trace:
+            trace.warn("No valid frontmatter found — D_det will be empty")
+    if trace:
+        trace.step("D_deterministic", message=f"Extracted {len(D_det)} declared capabilities",
+                   output_data={"D_det": sorted(D_det), "evidence_count": len(d_det_evidence)},
+                   duration_ms=(time.time() - t0) * 1000)
+        trace.metric("D_det_count", len(D_det))
 
     # --- Declared Track: LLM prompt ---
     skill_name = frontmatter.get("name", skill_dir.name) if frontmatter else skill_dir.name
     llm_declared_prompt = build_declared_llm_prompt(body, skill_name)
+    if trace:
+        trace.step("build_llm_declared_prompt", message=f"Built LLM prompt for declared extraction ({len(llm_declared_prompt)} chars)")
 
     # --- Actual Track: AST Analysis ---
+    t0 = time.time()
     scripts_dir = skill_dir / "scripts"
     script_files = []
     if scripts_dir.is_dir():
@@ -121,12 +150,32 @@ def phase1_extract_capabilities(
         )
 
     A_ast, flows_ast, ast_findings, _ = run_ast_analysis(script_files)
+    if trace:
+        trace.step("A_ast", message=f"AST analysis: {len(A_ast)} capabilities, {len(flows_ast)} flows",
+                   output_data={"A_ast": sorted(A_ast), "flows_count": len(flows_ast), "findings_count": len(ast_findings)},
+                   duration_ms=(time.time() - t0) * 1000)
+        trace.metric("A_ast_count", len(A_ast))
+        trace.metric("flows_ast_count", len(flows_ast))
 
     # --- Actual Track: Regex Engine ---
+    t0 = time.time()
     A_regex, regex_findings, all_urls, url_summary = run_regex_analysis(skill_dir)
+    if trace:
+        trace.step("A_regex", message=f"Regex engine: {len(A_regex)} capabilities, {len(regex_findings)} findings",
+                   output_data={"A_regex": sorted(A_regex), "findings_count": len(regex_findings),
+                               "urls_total": url_summary.get("total", 0),
+                               "untrusted_urls": url_summary.get("untrusted_count", 0)},
+                   duration_ms=(time.time() - t0) * 1000)
+        trace.metric("A_regex_count", len(A_regex))
+        trace.metric("regex_findings_count", len(regex_findings))
+        if url_summary.get("untrusted_count", 0) > 0:
+            trace.warn(f"Found {url_summary['untrusted_count']} untrusted URLs",
+                       data={"untrusted_urls": [u.get("url", "") for u in url_summary.get("untrusted", [])[:5]]})
 
     # --- Actual Track: LLM Instruction prompt ---
     llm_instruction_prompt = build_instruction_llm_prompt(body, skill_name)
+    if trace:
+        trace.step("build_llm_instruction_prompt", message=f"Built LLM prompt for instruction analysis ({len(llm_instruction_prompt)} chars)")
 
     # --- Structure info ---
     refs_dir = skill_dir / "references"
@@ -204,20 +253,46 @@ def phase2_detect_deviations(
     flows: List[Dict],
     d_evidence: List[Dict],
     a_evidence: List[Dict],
+    trace: Optional[TraceContext] = None,
 ) -> Dict:
     """Run Phase 2: compute deviations, compound flags, assemble Φ(s)."""
+    if trace:
+        trace.phase("detect")
+
+    t0 = time.time()
     U, O = compute_deviation(D, A)
+    if trace:
+        trace.step("compute_deviation", message=f"U={len(U)} undeclared, O={len(O)} overdeclared",
+                   output_data={"U": sorted(U), "O": sorted(O)},
+                   duration_ms=(time.time() - t0) * 1000)
+        trace.metric("undeclared_count", len(U))
+        trace.metric("overdeclared_count", len(O))
+        for cap in U:
+            risk = CAPABILITY_RISK.get(cap, RiskTier.MEDIUM)
+            if risk.value in ("critical", "high"):
+                trace.warn(f"Undeclared high-risk capability: {cap} (risk={risk.value})")
+
+    t0 = time.time()
     compound_flags = detect_compound_flags(flows, A, U)
+    if trace:
+        triggered = [k for k, v in compound_flags.items() if v]
+        trace.step("detect_compound_flags", message=f"Compound flags: {len(triggered)} triggered",
+                   output_data={"compound_flags": compound_flags, "triggered": triggered},
+                   duration_ms=(time.time() - t0) * 1000)
+        for flag in triggered:
+            prior = COMPOUND_FLAG_DEFS.get(flag, {}).get("malicious_prior", 0)
+            trace.warn(f"Compound threat flag triggered: {flag} (malicious prior: {prior:.0%})")
+
     phi = assemble_evidence_tuple(D, A, U, O, flows, compound_flags, d_evidence, a_evidence)
     risk_assessment = compute_risk_assessment(U, O, compound_flags)
+    if trace:
+        trace.metric("risk_score", risk_assessment["risk_score"])
+        trace.metric("compound_flags_triggered", risk_assessment["compound_flags_triggered"])
 
-    # Count instruction signals for rule engine
-    instruction_signals = sum(
-        1 for c in A if CAPABILITIES.get(c, CapabilityDef).category == "instruction"
-        if c  # Skip if not a valid cap
-    )
-    # Actually count from A more carefully
+    # Count instruction signals
     instr_count = sum(1 for c in A if c in CAPABILITIES and CAPABILITIES[c].category == "instruction")
+    if trace:
+        trace.metric("instruction_signals", instr_count)
 
     return {
         "U": sorted(U),
@@ -242,18 +317,39 @@ def phase3_deterministic(
     flows: List[Dict],
     compound_flags: Dict[str, bool],
     instruction_signals: int,
+    trace: Optional[TraceContext] = None,
 ) -> Dict:
     """Run Phase 3 deterministic components: rule engine + relaxed veto."""
+    if trace:
+        trace.phase("classify")
+
     # Rule engine
+    t0 = time.time()
     rule_leaf, rule_branch, rule_id, rule_kill_chain = apply_rule_engine(
         U, O, A, D, flows, compound_flags, instruction_signals
     )
+    if trace:
+        trace.step("apply_rule_engine",
+                   message=f"Rule engine: {'matched=' + rule_id if rule_id else 'no match'}",
+                   output_data={"matched": rule_leaf is not None, "intent_leaf": rule_leaf,
+                               "rule_id": rule_id, "kill_chain": rule_kill_chain},
+                   duration_ms=(time.time() - t0) * 1000)
 
     # Relaxed veto
+    t0 = time.time()
     veto_fired, veto_reason, veto_flag, veto_cap = relaxed_veto(compound_flags, U)
+    if trace:
+        trace.step("relaxed_veto",
+                   message=f"Relaxed veto: {'FIRED' if veto_fired else 'not triggered'}",
+                   output_data={"fired": veto_fired, "reason": veto_reason},
+                   duration_ms=(time.time() - t0) * 1000)
+        if veto_fired:
+            trace.warn(f"RELAXED_VETO FIRED: {veto_reason}")
 
     # Build LLM prompts if needed (rule engine didn't match, or for judge)
     needs_classifier = rule_leaf is None
+    if trace:
+        trace.metric("needs_llm_classifier", needs_classifier)
 
     return {
         "rule_engine": {
@@ -543,19 +639,32 @@ def _sanitize_frontmatter(fm: Optional[Dict]) -> Optional[Dict]:
 # =============================================================================
 
 
-def run_deterministic_pipeline(skill_dir: str) -> Dict:
+def run_deterministic_pipeline(skill_dir: str, trace: Optional[TraceContext] = None) -> Dict:
     """Run the full deterministic pipeline and return intermediate results.
 
     This is the main entry point called from the CLI or Workflow script.
     It runs phases 1+2+3(deterministic part) and returns everything needed
     for the Workflow script to make LLM calls.
+
+    If trace is not provided, a new TraceContext is created automatically.
     """
     skill_path = Path(skill_dir).resolve()
     if not skill_path.is_dir():
-        return {"error": f"Not a directory: {skill_path}"}
+        msg = f"Not a directory: {skill_path}"
+        if trace:
+            trace.error(msg)
+        else:
+            logger.error(msg)
+        return {"error": msg}
+
+    # Create trace if not provided
+    if trace is None:
+        trace = TraceContext(skill_name=skill_path.name, skill_dir=str(skill_path))
+
+    t_pipeline_start = time.time()
 
     # Phase 1
-    phase1 = phase1_extract_capabilities(skill_path)
+    phase1 = phase1_extract_capabilities(skill_path, trace=trace)
     if "error" in phase1:
         return phase1
 
@@ -565,8 +674,14 @@ def run_deterministic_pipeline(skill_dir: str) -> Dict:
     d_evidence = phase1.get("d_det_evidence", [])
     a_evidence = []
 
+    if trace:
+        trace.step("merge_deterministic_capabilities",
+                   message=f"Merged capabilities: |D_det|={len(D_det)}, |A_det|={len(A_det)}",
+                   output_data={"D_det": sorted(D_det), "A_det": sorted(A_det),
+                               "overlap": sorted(D_det & A_det)})
+
     phase2 = phase2_detect_deviations(
-        D_det, A_det, phase1.get("flows_ast", []), d_evidence, a_evidence
+        D_det, A_det, phase1.get("flows_ast", []), d_evidence, a_evidence, trace=trace
     )
 
     # Phase 3 deterministic
@@ -578,6 +693,7 @@ def run_deterministic_pipeline(skill_dir: str) -> Dict:
         phase1.get("flows_ast", []),
         phase2["compound_flags"],
         phase2["instruction_signals"],
+        trace=trace,
     )
 
     # Build finding counts for judge prompt
@@ -587,6 +703,11 @@ def run_deterministic_pipeline(skill_dir: str) -> Dict:
         sev = f.get("severity", "medium")
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
     severity_counts["total"] = len(all_findings)
+
+    if trace:
+        trace.metric("total_findings", len(all_findings))
+        trace.metric("findings_critical", severity_counts.get("critical", 0))
+        trace.metric("findings_high", severity_counts.get("high", 0))
 
     # Build Phase 3 LLM prompts
     llm_prompts = build_phase3_llm_prompts(
@@ -602,12 +723,40 @@ def run_deterministic_pipeline(skill_dir: str) -> Dict:
         phase3_det["rule_engine"],
     )
 
+    if trace:
+        trace.step("build_llm_prompts", message=f"Built LLM prompts for Phase 3 (judge: {len(llm_prompts.get('judge_prompt', ''))} chars)")
+
+    # For deterministic-only output, simulate final verdict via rules
+    if phase3_det["relaxed_veto"]["fired"]:
+        det_verdict = "malware"
+        det_confidence = 0.90
+        det_source = "relaxed_veto"
+    elif phase3_det["rule_engine"]["intent_category"] in ADVERSARIAL_BRANCHES:
+        det_verdict = "malware"
+        det_confidence = 0.80
+        det_source = "deterministic_rule"
+    else:
+        det_verdict = "benign"
+        det_confidence = 0.70
+        det_source = "deterministic_rule"
+
+    trace.finalize(det_verdict, det_confidence)
+    trace.metric("pipeline_total_ms", (time.time() - t_pipeline_start) * 1000)
+
     return {
         "phase1": phase1,
         "phase2": phase2,
         "phase3_deterministic": phase3_det,
         "llm_prompts": llm_prompts,
         "finding_counts": severity_counts,
+        "trace": trace.to_dict(),
+        "trace_summary": trace.summary(),
+        # Deterministic-only verdict (for debugging; final verdict requires LLM Judge)
+        "_det_verdict": {
+            "verdict": det_verdict,
+            "confidence": det_confidence,
+            "source": det_source,
+        },
     }
 
 
