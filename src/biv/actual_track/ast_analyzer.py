@@ -1148,6 +1148,213 @@ class JSTaintAnalyzer:
 
 
 # =============================================================================
+# Shell/Bash tree-sitter based taint analysis
+# =============================================================================
+
+SHELL_SOURCE_PATTERNS: Dict[str, Tuple[str, str]] = {
+    "curl": ("net-http-out", "curl"),
+    "wget": ("net-http-out", "wget"),
+    "nc": ("net-socket-out", "nc (netcat)"),
+    "ncat": ("net-socket-out", "ncat"),
+    "netcat": ("net-socket-out", "netcat"),
+    "/dev/tcp/": ("net-socket-out", "/dev/tcp/ reverse shell"),
+    "ssh": ("net-socket-out", "ssh"),
+}
+
+SHELL_SINK_PATTERNS: Dict[str, Tuple[str, str]] = {
+    "bash": ("proc-exec-shell", "bash"),
+    "sh": ("proc-exec-shell", "sh"),
+    "eval": ("proc-code-eval", "shell eval"),
+    "exec": ("proc-exec", "exec"),
+    "source": ("proc-exec-shell", "source (.)"),
+    "chmod +": ("fs-write", "chmod +x"),
+    "rm -rf": ("fs-delete", "rm -rf"),
+    "python": ("proc-exec", "python"),
+    "node": ("proc-exec", "node"),
+    "perl": ("proc-exec", "perl"),
+}
+
+
+class ShellTaintAnalyzer:
+    """Tree-sitter based taint analyzer for Shell scripts (bash/sh)."""
+
+    def __init__(self, filepath: Path):
+        self.filepath = filepath
+        self.capabilities: Set[str] = set()
+        self.flows: List[Dict] = []
+        self.findings: List[Dict] = []
+
+    def analyze(self, source: str) -> Tuple[Set[str], List[Dict], List[Dict]]:
+        try:
+            import tree_sitter_bash as ts_lang
+            from tree_sitter import Parser, Language
+        except ImportError as e:
+            logger.warning(f"tree-sitter-bash not available: {e}")
+            return self._fallback_regex_analysis(source)
+
+        lang_obj = Language(ts_lang.language())
+        parser = Parser(lang_obj)
+        tree = parser.parse(source.encode("utf-8"))
+        self._walk_tree(tree.root_node, source)
+        regex_caps, regex_findings = self._supplement_regex(source)
+        self.capabilities.update(regex_caps)
+        self.findings.extend(regex_findings)
+        return self.capabilities, self.flows, self.findings
+
+    def _walk_tree(self, node, source: str) -> None:
+        self._check_node(node, source)
+        for child in node.children:
+            self._walk_tree(child, source)
+
+    def _check_node(self, node, source: str) -> None:
+        node_type = node.type
+        node_text = source[node.start_byte:node.end_byte] if node.end_byte <= len(source) else ""
+
+        if node_type == "pipeline":
+            self._check_pipeline(node, source)
+            return
+
+        if node_type == "command":
+            self._check_command(node, source)
+            return
+
+    def _check_pipeline(self, node, source: str) -> None:
+        commands = []
+        for child in node.children:
+            if child.type == "command":
+                commands.append(source[child.start_byte:child.end_byte])
+
+        for i, cmd in enumerate(commands):
+            for pattern, (cap, _) in SHELL_SOURCE_PATTERNS.items():
+                if pattern in cmd:
+                    self.capabilities.add(cap)
+                    for j in range(i + 1, len(commands)):
+                        for sink_pat, (sink_cap, _) in SHELL_SINK_PATTERNS.items():
+                            if sink_pat in commands[j]:
+                                self.capabilities.add(sink_cap)
+                                self.flows.append({
+                                    "source": cap,
+                                    "source_location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                                    "transforms": [],
+                                    "sink": sink_cap,
+                                    "sink_location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                                })
+
+    def _check_command(self, node, source: str) -> None:
+        cmd_text = source[node.start_byte:node.end_byte]
+
+        for pattern, (cap, _) in SHELL_SOURCE_PATTERNS.items():
+            if pattern in cmd_text:
+                self.capabilities.add(cap)
+
+        for pattern, (cap, _) in SHELL_SINK_PATTERNS.items():
+            if pattern in cmd_text:
+                self.capabilities.add(cap)
+
+        # Reverse shell detection
+        if "/dev/tcp/" in cmd_text:
+            self.capabilities.add("net-socket-out")
+            self.capabilities.add("proc-exec-shell")
+            self.findings.append({
+                "type": "Reverse Shell (/dev/tcp)",
+                "severity": "critical", "category": "Malicious Code",
+                "location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                "description": "/dev/tcp/ reverse shell pattern detected",
+            })
+
+        if re.search(r"\bnc\s+.*-[ec]\s+/", cmd_text):
+            self.capabilities.add("net-socket-out")
+            self.capabilities.add("proc-exec-shell")
+            self.findings.append({
+                "type": "Reverse Shell (netcat)",
+                "severity": "critical", "category": "Malicious Code",
+                "location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                "description": "netcat reverse shell with -e/-c flag",
+            })
+
+        if re.search(r"bash\s+-i\s*>&\s*/dev/tcp/", cmd_text):
+            self.capabilities.add("net-socket-out")
+            self.findings.append({
+                "type": "Interactive Reverse Shell",
+                "severity": "critical", "category": "Malicious Code",
+                "location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                "description": "Interactive bash reverse shell (bash -i >& /dev/tcp/)",
+            })
+
+        # Download + execute
+        if re.search(r"(curl|wget).*\|.*(bash|sh|python|perl)", cmd_text):
+            self.capabilities.add("net-download-exec")
+            self.findings.append({
+                "type": "Download & Execute",
+                "severity": "critical", "category": "Malicious Code",
+                "location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                "description": "Remote content piped to interpreter (curl|bash)",
+            })
+
+        if re.search(r"(curl|wget).*-[oO]\s+\S+.*(chmod|bash|\.\/)", cmd_text):
+            self.capabilities.add("net-download-exec")
+            self.findings.append({
+                "type": "Download & Execute (file)",
+                "severity": "critical", "category": "Malicious Code",
+                "location": f"{self.filepath.name}:{node.start_point[0] + 1}",
+                "description": "Binary downloaded to disk for execution",
+            })
+
+        # Background execution
+        if cmd_text.strip().endswith("&"):
+            self.capabilities.add("instr-silent-exec")
+
+        if cmd_text.startswith("nohup"):
+            self.capabilities.add("instr-silent-exec")
+
+    def _supplement_regex(self, source: str) -> Tuple[Set[str], List[Dict]]:
+        caps: Set[str] = set()
+        findings: List[Dict] = []
+
+        if re.search(r"base64\s+(?:-d|--decode)\s*\|?\s*(?:bash|sh|\$)", source):
+            caps.add("enc-base64")
+            caps.add("proc-exec-shell")
+            findings.append({
+                "type": "Base64 Encoded Payload",
+                "severity": "critical", "category": "Malicious Code",
+                "location": f"{self.filepath.name}",
+                "description": "Base64 decoded content piped to shell",
+            })
+
+        if re.search(r"export\s+\w*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)\w*=", source, re.IGNORECASE):
+            caps.add("cred-read")
+
+        if re.search(r"\$\([^)]{3,}\)", source):
+            caps.add("proc-exec-shell")
+
+        return caps, findings
+
+    def _fallback_regex_analysis(self, source: str) -> Tuple[Set[str], List[Dict], List[Dict]]:
+        caps: Set[str] = set()
+        findings: List[Dict] = []
+
+        if re.search(r"\bcurl\b", source):
+            caps.add("net-http-out")
+        if re.search(r"\bwget\b", source):
+            caps.add("net-http-out")
+        if re.search(r"/dev/tcp/|nc\s+.*-[ec]\s+/|bash\s+-i\s*>&", source):
+            caps.add("net-socket-out")
+            caps.add("proc-exec-shell")
+        if re.search(r"(curl|wget).*\|.*(bash|sh|python)", source):
+            caps.add("net-download-exec")
+        if re.search(r">\s*\S+", source):
+            caps.add("fs-write")
+        if re.search(r"\bchmod\s+\+", source):
+            caps.add("fs-write")
+        if re.search(r"\brm\s+-rf?\b", source):
+            caps.add("fs-delete")
+        if re.search(r"\bbase64\b", source):
+            caps.add("enc-base64")
+
+        return caps, self.flows, findings
+
+
+# =============================================================================
 # Main entry point
 # =============================================================================
 
@@ -1190,8 +1397,15 @@ def run_ast_analysis(
             all_findings.extend(findings)
 
         elif suffix == ".sh":
-            # Shell files: tree-sitter-bash could be added later; keep regex path
-            pass
+            try:
+                source = script_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            analyzer = ShellTaintAnalyzer(script_path)
+            caps, flows, findings = analyzer.analyze(source)
+            all_capabilities.update(caps)
+            all_flows.extend(flows)
+            all_findings.extend(findings)
 
     compound_flags: Dict[str, bool] = {
         "exfiltration_chain": False,
