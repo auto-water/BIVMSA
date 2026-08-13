@@ -40,7 +40,7 @@
 
 ### 2.2 Python 依赖
 
-三种模式共用确定性核心依赖；LLM 全流程额外需要 openai + python-dotenv。
+所有模式共用确定性核心依赖。
 
 ```bash
 # 一键安装全部依赖
@@ -53,10 +53,6 @@ pip install tree-sitter
 pip install tree-sitter-javascript
 pip install tree-sitter-typescript
 pip install tree-sitter-bash
-
-# LLM 全流程额外依赖 (Python 确定性模式 / Workflow 模式不需要)
-pip install openai        # OpenAI 兼容 LLM 客户端
-pip install python-dotenv # .env 配置加载
 ```
 
 验证安装：
@@ -66,28 +62,7 @@ python -c "import yaml; print('pyyaml OK')"
 python -c "from tree_sitter import Parser; print('tree-sitter OK')"
 python -c "import tree_sitter_javascript; print('JS OK')"
 python -c "import tree_sitter_bash; print('Bash OK')"
-python -c "import openai; print('openai OK')"   # LLM 全流程需要
 ```
-
-### 2.4 LLM 接口配置 (.env)
-
-LLM 全流程通过 `.env` 配置业务 LLM 接口（OpenAI 兼容格式）：
-
-```bash
-cp .env.example .env      # 然后编辑 .env 填充实际值
-```
-
-`.env` 字段：
-
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `LLM_BASE_URL` | 业务 LLM 接口地址 | `https://api.deepseek.com` 或 `http://<host>:<port>/v1` |
-| `LLM_API_KEY` | 接口 API Key | `sk-...` |
-| `LLM_MODEL` | 模型名 | `Qwen3-32B-V1` / `MiniMax-M2.7` / `deepseek-v4-flash` |
-| `LLM_MAX_TOKENS` | 最大生成 tokens（Judge 需较大预算） | `8192` |
-| `LLM_MAX_RETRIES` | 解析/校验失败重试次数 | `3` |
-
-`.env` 已加入 `.gitignore`，不会提交到仓库。
 
 ### 2.3 项目结构
 
@@ -95,14 +70,13 @@ cp .env.example .env      # 然后编辑 .env 填充实际值
 MAS4MalSkill/
 ├── package.json              # npm scripts
 ├── README.md                 # 本文档
-├── requirements.txt          # Python 依赖 (核心 + LLM)
-├── .env.example              # LLM 接口配置模板 (复制为 .env)
+├── requirements.txt          # Python 依赖 (核心)
 ├── docs/
 │   ├── skill-scanner/        # 旧版 scanner 参考文档
 │   └── BIV-SYSTEM-DOCS.md    # 完整系统文档 (mermaid 图)
 ├── src/biv/                  # BIV 核心实现
 │   ├── taxonomy.py           # 7类x29能力 + 意图分类 + 规则
-│   ├── trace.py              # 调试追踪
+│   ├── trace.py              # 调试追踪 (trace/result 分离)
 │   ├── declared_track.py     # Module 1: D(s) 声明能力提取
 │   ├── actual_track/         # Module 2: A(s) 实际能力提取
 │   │   ├── ast_analyzer.py   #   AST 污点分析 (Python/JS/TS/Shell)
@@ -111,14 +85,10 @@ MAS4MalSkill/
 │   ├── deviation.py          # Module 3: 偏差检测 + compound flags
 │   ├── root_cause.py         # Module 4: 15条规则 + LLM 分类器
 │   ├── malicious_detect.py   # Module 5: Relaxed-Veto + LLM Judge
-│   ├── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
-│   ├── llm_config.py         # [模式C] .env 配置加载
-│   ├── llm_client.py         # [模式C] OpenAI 兼容 LLM 客户端
-│   └── pipeline_llm.py       # [模式C] LLM 全流程编排
+│   └── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
 ├── scripts/
 │   ├── biv_audit.py          # [模式A] 单 skill 审计 (--evidence 精简模式)
 │   ├── batch_audit.py        # [模式A] 批量确定性审计
-│   ├── batch_llm.py          # [模式C] 批量 LLM 审计 (业务主机)
 │   ├── biv_workflow.js       # [模式B] LLM 单 case 审计 (Claude Agent)
 │   └── batch_workflow.js     # [模式B] LLM 批量审计 (Claude Agent)
 └── experiment/cases/         # 测试用例
@@ -310,7 +280,7 @@ npm run batch:json
 python scripts/batch_audit.py --verbose
 ```
 
-`--evidence` 输出紧凑确定性结论（D/U/O、compound_flags、rule_engine、relaxed_veto、_det_verdict），是模式 B/C 调用 Python 管线的接口。
+`--evidence` 输出紧凑确定性结论（D/U/O、compound_flags、rule_engine、relaxed_veto、_det_verdict），是模式 B 调用 Python 管线的接口。
 
 冒烟测试：
 
@@ -350,42 +320,7 @@ Workflow JS (编排器)
 
 ---
 
-### 模式 C：LLM 全流程（业务 LLM 接口，任意主机）
 
-通过 OpenAI 兼容接口调用业务 LLM（Qwen3-32B-V1 / MiniMax-M2.7 / deepseek 等），**不依赖 Claude Code**。需要先配置 `.env`（见 2.4 节）。
-
-```bash
-# 单 skill 审计
-python scripts/batch_llm.py --single <skill-directory> --verbose
-
-# 批量审计 (终端汇总表)
-python scripts/batch_llm.py --verbose
-
-# 批量审计 (JSON 到文件)
-python scripts/batch_llm.py --output batch-llm-result.json
-```
-
-或通过 npm：
-
-```bash
-npm run llm:single -- experiment/cases/<skill>   # 单 case
-npm run llm:batch                                # 批量
-npm run llm:json                                 # 批量 → JSON
-```
-
-**每个 case 的 LLM 调用链**（与模式 B 一致，仅 LLM 传输方式不同）：
-
-```
-pipeline_llm.py (Python 编排器)
-  ├─ run_deterministic_pipeline() → Phi(s) 证据
-  ├─ D_llm: 语义声明能力提取 (复用 prompt builder + 3重幻觉控制)
-  ├─ A_llm_instr: 指令隐藏能力检测 (复用)
-  ├─ LLM Classifier: 仅当 15 条规则未命中时
-  └─ LLM Judge: 合并 D/A/U/O + flows + compound_flags + root_cause
-     └─ 输出: verdict + confidence (LLM 全失败时降级 _det_verdict)
-```
-
----
 
 ## 六、技术架构
 
