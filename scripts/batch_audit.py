@@ -43,11 +43,26 @@ def _derive_class(case_path: Path) -> str:
     return "unknown"
 
 
-def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = None) -> dict:
+def run_batch(
+    cases_dir: str,
+    verbose: bool = False,
+    trace_dir: str | None = None,
+    results_dir: str | None = None,
+) -> dict:
     """Run BIV audit against all cases and return aggregated results.
 
-    Trace is separated: if trace_dir is given, each case's trace is written to
+    Trace separation: if trace_dir is given, each case's trace is written to
     <trace_dir>/<case>_trace.json; the aggregated results never embed trace.
+
+    Results separation: if results_dir is given, each case's FULL pipeline
+    result is written to <results_dir>/<rel>/result.json, mirroring the cases
+    directory structure (e.g. results/std-cases-4/benign/<skill>/result.json).
+    Error cases are written too, so no case is silently dropped.
+
+    Trace separation: unless trace_dir is explicitly given, each case's trace
+    is also written to its own mirrored directory
+    (<results_dir>/<rel>/<skill>_trace.json), so result and trace never mix in
+    the same file. result.json._meta.trace_file points to it.
     """
     cases = discover_cases(Path(cases_dir))
 
@@ -61,14 +76,19 @@ def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = Non
         case_name = case_path.name
         t0 = time.time()
 
+        # Trace separation: by default each case's trace goes into its own
+        # mirrored result directory (<results_dir>/<rel>/), alongside result.json.
+        # An explicitly passed --trace-dir overrides this and uses one directory.
+        case_trace_dir = trace_dir
+        if trace_dir is None and results_dir:
+            rel = case_path.relative_to(Path(cases_dir))
+            case_trace_dir = str(Path(results_dir) / rel)
+
         try:
-            r = run_deterministic_pipeline(str(case_path), trace_dir=trace_dir)
+            r = run_deterministic_pipeline(str(case_path), trace_dir=case_trace_dir)
         except Exception as e:
-            results.append({
-                "case": case_name,
-                "error": str(e),
-            })
-            continue
+            # Error case: still record it and write a split result file.
+            r = {"error": str(e)}
 
         p1 = r.get("phase1", {})
         p2 = r.get("phase2", {})
@@ -117,17 +137,29 @@ def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = Non
 
         results.append(result)
 
+        # --- Results separation: mirror the cases directory structure ---
+        # rel keeps the full sub-path under cases/, e.g. std-cases-4/benign/<skill>.
+        if results_dir:
+            rel = case_path.relative_to(Path(cases_dir))
+            out_path = Path(results_dir) / rel / "result.json"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            if verbose:
+                print(f"  [write] {out_path}")
+
     total_ms = (time.time() - start_time) * 1000
 
     # Aggregate
     total = len(results)
     errors = sum(1 for r in results if r.get("error"))
-    malware = sum(1 for r in results if r["verdict"] == "malware")
-    benign = sum(1 for r in results if r["verdict"] == "benign")
+    malware = sum(1 for r in results if r.get("verdict") == "malware")
+    benign = sum(1 for r in results if r.get("verdict") == "benign")
     matched = sum(1 for r in results if r.get("match") is True)
     mismatched = sum(1 for r in results if r.get("match") is False)
-    veto_count = sum(1 for r in results if r["relaxed_veto"]["fired"])
-    rule_count = sum(1 for r in results if r["rule_engine"]["matched"])
+    veto_count = sum(1 for r in results if r.get("relaxed_veto", {}).get("fired"))
+    rule_count = sum(1 for r in results if r.get("rule_engine", {}).get("matched"))
 
     return {
         "summary": {
@@ -149,20 +181,28 @@ def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     output_path = None
     trace_dir = None
+    results_dir = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == "--output" and i < len(sys.argv) - 1:
             output_path = sys.argv[i + 1]
         if arg == "--trace-dir" and i < len(sys.argv) - 1:
             trace_dir = sys.argv[i + 1]
+        if arg == "--results-dir" and i < len(sys.argv) - 1:
+            results_dir = sys.argv[i + 1]
 
     cases_dir = Path(__file__).resolve().parent.parent / "experiment" / "cases"
 
+    # Results separation: default to experiment/results (mirrors cases structure)
+    if results_dir is None:
+        results_dir = str(Path(__file__).resolve().parent.parent / "experiment" / "results")
+
     if verbose:
         print(f"Scanning: {cases_dir}")
+        print(f"Split results → {results_dir}")
         print()
 
-    batch_result = run_batch(str(cases_dir), verbose=verbose, trace_dir=trace_dir)
+    batch_result = run_batch(str(cases_dir), verbose=verbose, trace_dir=trace_dir, results_dir=results_dir)
 
     if verbose:
         print()

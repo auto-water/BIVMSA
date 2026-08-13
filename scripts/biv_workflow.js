@@ -116,33 +116,20 @@ ${fmtFlows(det.flows)}
 ### Deterministic Verdict: ${JSON.stringify(det._det_verdict || {})}`;
 }
 
-// Read skill content directly for LLM prompts
-const skillMdPath = `${skillDir}/SKILL.md`;
-const skillContent = await (async () => {
-  try {
-    // Read via agent
-    const content = await agent(
-      `Read the file at ${skillMdPath} and output its complete content verbatim. Do not add any commentary.`,
-      { label: 'read-skill-md' }
-    );
-    return content || '';
-  } catch (e) {
-    log(`Warning: Could not read ${skillMdPath}: ${e}`);
-    return '';
-  }
-})();
+// Parse the skill via the stable Python parser (frontmatter / body / name /
+// scripts / non_executable) so this workflow shares the same parsing logic as
+// the deterministic pipeline and batch workflow. See scripts/skill_parse.py.
+const parsedSkill = parseJsonOutput(await agent(
+  `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences:
 
-// Parse frontmatter to get skill name
-const skillName = (() => {
-  const match = skillContent.match(/^---\nname:\s*(.+?)\n/m);
-  return match ? match[1].trim() : skillDir.split('/').pop();
-})();
+python scripts/skill_parse.py ${skillDir}
 
-// Extract body (after frontmatter)
-const bodyContent = (() => {
-  const parts = skillContent.split('---', 3);
-  return parts.length >= 3 ? parts[2].trim() : skillContent;
-})();
+The output is a single JSON object. Output ONLY that JSON object.`,
+  { label: 'parse-skill' }
+));
+const skillContent = (parsedSkill && parsedSkill.content_full) || '';
+const skillName = (parsedSkill && parsedSkill.name) || skillDir.split('/').pop();
+const bodyContent = (parsedSkill && parsedSkill.body) || '';
 
 // Step 1b: Parallel LLM extraction
 log('Running LLM capability extraction (declared track + instruction analysis)...');

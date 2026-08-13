@@ -31,19 +31,17 @@ from .taxonomy import (
     CapabilityDef,
     RiskTier,
 )
+from .skill_parser import split_frontmatter, walk_skill_files
 from .declared_track import (
-    parse_frontmatter,
     extract_tools_from_frontmatter,
     map_tools_to_capabilities,
     extract_declared_deterministic,
-    build_declared_llm_prompt,
     validate_llm_output,
     merge_declared,
 )
 from .actual_track.ast_analyzer import run_ast_analysis
 from .actual_track.regex_engine import run_regex_analysis
 from .actual_track.llm_instruction import (
-    build_instruction_llm_prompt,
     validate_instruction_llm_output,
 )
 from .deviation import (
@@ -60,7 +58,6 @@ from .root_cause import (
 )
 from .malicious_detect import (
     relaxed_veto,
-    build_judge_prompt,
     validate_judge_output,
     final_verdict,
 )
@@ -109,11 +106,11 @@ def phase1_extract_capabilities(
             trace.error(msg)
         return {"error": msg}
 
-    # Parse frontmatter and body
+    # Parse frontmatter and body (stable parser, shared with Workflow scripts)
     t0 = time.time()
-    frontmatter, body = parse_frontmatter(content)
+    frontmatter, body = split_frontmatter(content)
     if trace:
-        trace.step("parse_frontmatter", message="Parsed SKILL.md frontmatter",
+        trace.step("split_frontmatter", message="Parsed SKILL.md frontmatter",
                    input_data={"path": str(skill_md)},
                    output_data={"has_frontmatter": frontmatter is not None, "body_len": len(body)},
                    duration_ms=(time.time() - t0) * 1000)
@@ -134,20 +131,14 @@ def phase1_extract_capabilities(
                    duration_ms=(time.time() - t0) * 1000)
         trace.metric("D_det_count", len(D_det))
 
-    # --- Declared Track: LLM prompt ---
+    # --- Declared Track: skill name ---
     skill_name = frontmatter.get("name", skill_dir.name) if frontmatter else skill_dir.name
-    llm_declared_prompt = build_declared_llm_prompt(body, skill_name)
-    if trace:
-        trace.step("build_llm_declared_prompt", message=f"Built LLM prompt for declared extraction ({len(llm_declared_prompt)} chars)")
 
     # --- Actual Track: AST Analysis ---
     t0 = time.time()
-    scripts_dir = skill_dir / "scripts"
-    script_files = []
-    if scripts_dir.is_dir():
-        script_files = sorted(
-            [f for f in scripts_dir.iterdir() if f.suffix in (".py", ".sh", ".js", ".ts")]
-        )
+    # Enumerate executable scripts across the whole skill dir (stable parser).
+    scripts_rel, _ = walk_skill_files(skill_dir)
+    script_files = [skill_dir / s for s in scripts_rel]
 
     A_ast, flows_ast, ast_findings, _ = run_ast_analysis(script_files)
     if trace:
@@ -172,28 +163,18 @@ def phase1_extract_capabilities(
             trace.warn(f"Found {url_summary['untrusted_count']} untrusted URLs",
                        data={"untrusted_urls": [u.get("url", "") for u in url_summary.get("untrusted", [])[:5]]})
 
-    # --- Actual Track: LLM Instruction prompt ---
-    llm_instruction_prompt = build_instruction_llm_prompt(body, skill_name)
-    if trace:
-        trace.step("build_llm_instruction_prompt", message=f"Built LLM prompt for instruction analysis ({len(llm_instruction_prompt)} chars)")
-
     # --- Structure info ---
     refs_dir = skill_dir / "references"
     structure = {
         "has_skill_md": True,
         "has_references": refs_dir.is_dir(),
-        "has_scripts": scripts_dir.is_dir(),
+        "has_scripts": bool(scripts_rel),
         "reference_files": (
             sorted(f.name for f in refs_dir.iterdir() if f.suffix == ".md")
             if refs_dir.is_dir()
             else []
         ),
-        "script_files": (
-            sorted(f.name for f in scripts_dir.iterdir()
-                   if f.suffix in (".py", ".sh", ".js", ".ts"))
-            if scripts_dir.is_dir()
-            else []
-        ),
+        "script_files": scripts_rel,
     }
 
     # --- Tools info ---
@@ -229,16 +210,8 @@ def phase1_extract_capabilities(
         "flows_ast": flows_ast,
         "ast_findings": ast_findings,
         "regex_findings": regex_findings,
-        # LLM prompts (for Workflow script)
-        "llm_declared_prompt": llm_declared_prompt,
-        "llm_instruction_prompt": llm_instruction_prompt,
         # URL data
         "urls": url_summary,
-        # Raw skill body for LLM tasks
-        "skill_body": body,
-        "skill_content_full": content,
-        # Reference data for LLM tasks
-        "skill_md_path": str(skill_md),
     }
 
 
@@ -376,17 +349,15 @@ def phase3_deterministic(
 
 def build_phase3_llm_prompts(
     skill_name: str,
-    skill_content: str,
     U: Set[str],
     O: Set[str],
     A: Set[str],
     D: Set[str],
     flows: List[Dict],
     compound_flags: Dict[str, bool],
-    findings_count: Dict,
     rule_engine_result: Dict,
 ) -> Dict:
-    """Build LLM prompts for Phase 3 classifier and judge."""
+    """Build LLM prompts for Phase 3 classifier."""
     # Classifier prompt (only if rule engine didn't match)
     classifier_prompt = None
     if not rule_engine_result.get("matched"):
@@ -394,7 +365,7 @@ def build_phase3_llm_prompts(
             U, O, A, D, flows, compound_flags, skill_name
         )
 
-    # Judge prompt (always needed)
+    # Root cause preview (shared reference for report)
     root_cause_preview = {
         "classification": (
             "adversarial"
@@ -416,14 +387,8 @@ def build_phase3_llm_prompts(
         ),
     }
 
-    judge_prompt = build_judge_prompt(
-        skill_name, skill_content, D, A, U, O, flows, compound_flags,
-        root_cause_preview, findings_count,
-    )
-
     return {
         "classifier_prompt": classifier_prompt,
-        "judge_prompt": judge_prompt,
         "root_cause_preview": root_cause_preview,
     }
 
@@ -783,19 +748,17 @@ def run_deterministic_pipeline(
     # Build Phase 3 LLM prompts
     llm_prompts = build_phase3_llm_prompts(
         phase1["skill_name"],
-        phase1["skill_content_full"],
         set(phase2["undeclared"]),
         set(phase2["overdeclared"]),
         A_det,
         D_det,
         phase1.get("flows_ast", []),
         phase2["compound_flags"],
-        severity_counts,
         phase3_det["rule_engine"],
     )
 
     if trace:
-        trace.step("build_llm_prompts", message=f"Built LLM prompts for Phase 3 (judge: {len(llm_prompts.get('judge_prompt', ''))} chars)")
+        trace.step("build_llm_prompts", message=f"Built LLM prompts for Phase 3 (classifier: {len(llm_prompts.get('classifier_prompt') or '')} chars)")
 
     # For deterministic-only output, simulate final verdict via rules
     if phase3_det["relaxed_veto"]["fired"]:

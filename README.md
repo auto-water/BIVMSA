@@ -40,7 +40,7 @@
 
 ### 2.2 Python 依赖
 
-所有模式共用确定性核心依赖。
+两种模式共用确定性核心依赖。
 
 ```bash
 # 一键安装全部依赖
@@ -73,7 +73,9 @@ MAS4MalSkill/
 ├── requirements.txt          # Python 依赖 (核心)
 ├── docs/
 │   ├── skill-scanner/        # 旧版 scanner 参考文档
-│   └── BIV-SYSTEM-DOCS.md    # 完整系统文档 (mermaid 图)
+│   ├── BIV-SYSTEM-DOCS.md    # 完整系统文档 (mermaid 图)
+│   ├── my-approach-design.md         # 两轮 D-A 验证架构设计 (协议 P1-P7)
+│   └── my-approach-modification-plan.md  # 后续修改计划 (Phase 0-3)
 ├── src/biv/                  # BIV 核心实现
 │   ├── taxonomy.py           # 7类x29能力 + 意图分类 + 规则
 │   ├── trace.py              # 调试追踪 (trace/result 分离)
@@ -85,13 +87,20 @@ MAS4MalSkill/
 │   ├── deviation.py          # Module 3: 偏差检测 + compound flags
 │   ├── root_cause.py         # Module 4: 15条规则 + LLM 分类器
 │   ├── malicious_detect.py   # Module 5: Relaxed-Veto + LLM Judge
+│   ├── skill_parser.py       # 稳定单 skill 目录解析（各入口共用）
 │   └── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
 ├── scripts/
 │   ├── biv_audit.py          # [模式A] 单 skill 审计 (--evidence 精简模式)
-│   ├── batch_audit.py        # [模式A] 批量确定性审计
+│   ├── batch_audit.py        # [模式A] 批量确定性审计 (递归发现用例)
+│   ├── skill_parse.py        # skill_parser 的 CLI 入口（workflow 复用）
 │   ├── biv_workflow.js       # [模式B] LLM 单 case 审计 (Claude Agent)
 │   └── batch_workflow.js     # [模式B] LLM 批量审计 (Claude Agent)
-└── experiment/cases/         # 测试用例
+└── experiment/
+    ├── cases/                # 测试用例 (std-cases-4: benign/ malware/)
+    │   └── std-cases-4/
+    │       ├── benign/       #   良性 skill (标签由目录路径推导)
+    │       └── malware/      #   恶意 skill
+    └── results/              # 批量测试输出 (镜像 cases 结构，每 case 一个 result.json)
 ```
 
 ---
@@ -135,17 +144,25 @@ license: MIT                          # 可选
 
 ### 3.3 测试用例约定
 
-`experiment/cases/` 下的每个目录作为一个测试用例：
+测试用例位于 `experiment/cases/std-cases-4/` 下，按真实标签分目录存放：
 
 ```
-experiment/cases/
-└── <skill-name>/
-    ├── SKILL.md
-    ├── scripts/...
-    └── .expected            # 可选：预期判定 (malware / benign)
+experiment/cases/std-cases-4/
+├── benign/                      # 良性 skill（期望判定：benign）
+│   ├── 1password-1/
+│   │   └── SKILL.md             #   + 可选 scripts/ 等附件
+│   └── 2captcha/
+│       └── SKILL.md
+└── malware/                     # 恶意 skill（期望判定：malware）
+    ├── 000-jeremy-content-consistency-validator__CI_B4/
+    │   └── SKILL.md
+    └── ai-wrapper-product__CI_B6/
+        └── SKILL.md
 ```
 
-`.expected` 文件内容为单行 `malware` 或 `benign`，用于批量测试时验证判定准确性。
+**Ground truth 来源**：真实标签由目录路径段 `benign`/`malware` 推导（`batch_audit.py` 的 `_derive_class()`），**不使用 `.expected` 文件**——避免把答案泄漏进审计上下文，防止 Workflow/LLM 阶段"偷看答案"。
+
+**目录深度不敏感**：批量扫描用 `rglob("SKILL.md")` 递归发现任意深度的用例，目录可自由嵌套，新增用例只需把 skill 目录放进对应标签目录。
 
 ---
 
@@ -224,37 +241,62 @@ experiment/cases/
 ```json
 {
   "summary": {
-    "total_cases": 2,
-    "malware": 2,
-    "benign": 0,
+    "total_cases": 4,
     "errors": 0,
-    "expected_matched": 2,
-    "expected_mismatched": 0,
+    "malware": 3,
+    "benign": 1,
+    "expected_matched": 3,
+    "expected_mismatched": 1,
     "veto_triggered": 2,
-    "rule_engine_hits": 2
+    "rule_engine_hits": 4
   },
-  "total_duration_ms": 44,
-  "results": [ { "case": "...", "verdict": "malware", "confidence": 0.9, "..." } ]
+  "total_duration_ms": 55,
+  "results": [
+    {
+      "case": "1password-1",
+      "class": "benign",
+      "skill_name": "1password",
+      "duration_ms": 20.3,
+      "verdict": "malware",
+      "confidence": 0.8,
+      "source": "deterministic_rule",
+      "expected": "benign",
+      "match": false,
+      "capabilities": {
+        "D_det": 0, "A_ast": 0, "A_regex": 1,
+        "U_count": 1, "O_count": 0, "flows": 0
+      },
+      "compound_flags": {},
+      "rule_engine": {
+        "matched": true, "rule_id": "rule_3",
+        "intent_leaf": "A1", "kill_chain": null
+      },
+      "relaxed_veto": { "fired": false },
+      "findings": { "critical": 0, "high": 1, "medium": 0, "total": 1 },
+      "error": null
+    }
+  ]
 }
 ```
 
+说明：`class` 与 `expected` 均为 ground truth（来自路径段）；`verdict` 是系统判定；`match` 为二者是否一致。`capabilities` 中的 `U_count`/`O_count` 对应未声明能力 `undeclared` 与过度声明能力 `overdeclared` 的数量。
+
 ---
 
-## 五、使用方法 — 三种模式
+## 五、使用方法 — 两种模式
 
 | 模式 | LLM 调用 | 运行环境 | 适用场景 |
 |------|---------|---------|---------|
-| **A. Python 确定性模式** | 无 | 任意主机（含业务主机） | 快速预筛、CI、无 LLM 环境 |
+| **A. Python 确定性模式** | 无 | 任意主机 | 快速预筛、CI、无 LLM 环境 |
 | **B. Workflow 全流程** | Claude Agent | Claude Code 运行时 | 开发/审计时用最强模型推理 |
-| **C. LLM 全流程** | 业务 LLM 接口 | 任意主机 + `.env` 配置 | 业务主机上线，OpenAI 兼容接口 |
 
-三种模式**共用同一套确定性核心**（taxonomy / AST 污点 / 规则引擎 / Relaxed-Veto），仅 LLM 调用层不同。
+两种模式**共用同一套确定性核心**（taxonomy / AST 污点 / 规则引擎 / Relaxed-Veto），仅 LLM 调用层不同。LLM 调用仅在模式 B 中通过 Claude Code 的 Agent 工具执行，**无需 `.env` 配置**。
 
 ---
 
 ### 模式 A：Python 确定性模式（无 LLM，任意主机）
 
-单 skill 审计：
+**单 skill 审计**：
 
 ```bash
 # 完整确定性结果 (phases + trace + LLM prompts)
@@ -263,26 +305,61 @@ python scripts/biv_audit.py <skill-directory>
 # 输出 JSON 到文件
 python scripts/biv_audit.py <skill-directory> --output result.json
 
-# 精简 Phi(s) 证据 (供 Workflow/LLM 全流程消费)
+# 精简 Phi(s) 证据 (供模式 B 的 LLM Judge 消费)
 python scripts/biv_audit.py <skill-directory> --evidence
+
+# 可选：trace 单独写入独立目录 (trace/result 分离)
+python scripts/biv_audit.py <skill-directory> --trace-dir experiment/results/traces
 ```
 
-批量审计：
+**批量审计**（递归扫描 `experiment/cases/` 下所有含 `SKILL.md` 的目录，标签从路径推导）：
 
 ```bash
-# 终端汇总表
+# 每个样例拆分写入 results（镜像 cases 目录结构）+ 终端汇总
+npm run batch-test
+# 等价于: python scripts/batch_audit.py --verbose --results-dir experiment/results
+
+# 也可直接（results-dir 默认就是 experiment/results）
 npm run batch
-
-# JSON 到文件
-npm run batch:json
-
-# 或直接
 python scripts/batch_audit.py --verbose
+
+# 聚合 summary 另存 JSON 文件
+npm run batch:json
+python scripts/batch_audit.py --output experiment/results/batch_result.json
+
+# 自定义拆分目录
+python scripts/batch_audit.py --results-dir /tmp/my-run
 ```
+
+**拆分结果格式**：每个 case 的完整流水线结果与调试 trace **分离**为两个文件，写入 `experiment/results/` 下与 cases **相同结构的目录**：
+
+```
+experiment/results/
+└── std-cases-4/
+    ├── benign/
+    │   ├── 1password-1/
+    │   │   ├── result.json             # 完整 phase1/2/3 + _det_verdict
+    │   │   └── 1password-1_trace.json  # 调试 trace（三阶段步骤/指标，33+ 条记录）
+    │   └── 2captcha/
+    │       ├── result.json
+    │       └── 2captcha_trace.json
+    └── malware/
+        ├── 000-jeremy.../
+        │   ├── result.json
+        │   └── 000-jeremy..._trace.json
+        └── ai-wrapper-product__CI_B6/
+            ├── result.json
+            └── ai-wrapper-product__CI_B6_trace.json
+```
+
+- `result.json` 是审计数据；`<skill>_trace.json` 是调试 trace，二者永不混在同一个文件里（trace/result 分离）
+- `result.json._meta.trace_file` 引用对应 trace 文件的路径
+- 错误 case 同样写入（含 `"error"`），不静默丢弃
+- 若显式传 `--trace-dir <dir>`，trace 统一写入该目录（`<skill>_trace.json`），不再镜像
 
 `--evidence` 输出紧凑确定性结论（D/U/O、compound_flags、rule_engine、relaxed_veto、_det_verdict），是模式 B 调用 Python 管线的接口。
 
-冒烟测试：
+**冒烟测试**（两个 malware 基准样本必须判 malware，否则测试失败）：
 
 ```bash
 npm run test:smoke
@@ -297,17 +374,24 @@ npm run test:smoke
 LLM 调用通过 Claude Agent 执行，脚本通过**子代理调用 Python 确定性管线**获取 `Phi(s)` 精简证据，再注入 LLM Judge：
 
 ```js
-// 单 case
-Workflow({scriptPath: "scripts/biv_workflow.js", args: {skill_dir: "..."}})
+// 单 case 审计（在 Claude Code 中执行 Workflow 工具）
+Workflow({scriptPath: "scripts/biv_workflow.js",
+          args: {skill_dir: "experiment/cases/std-cases-4/malware/000-jeremy-content-consistency-validator__CI_B4"}})
 
-// 批量
+// 批量审计（每个 case 独立上下文；聚合写入 batch_workflow_result.json，
+// 每个 case 结果拆分写入 experiment/results/<rel>/result.json 镜像目录）
 Workflow({scriptPath: "scripts/batch_workflow.js"})
 ```
+
+> **重要**：workflow 脚本必须在 Claude Code 运行时内执行（LLM 调用依赖 Agent 工具），不能直接 `node scripts/biv_workflow.js`。
+> 批量审计的 ground truth 由路径段 `benign`/`malware` 推导，不读取 `.expected` 文件。
 
 **每个 case 的 LLM 调用链**：
 
 ```
 Workflow JS (编排器)
+  ├─ 子代理 → python scripts/skill_parse.py <case>
+  │           → 稳定解析 (frontmatter / body / name / scripts)
   ├─ 子代理 → python scripts/biv_audit.py <case> --evidence
   │           → 返回 Phi(s) 精简证据 (D/U/O + compound_flags
   │             + rule_engine + relaxed_veto + _det_verdict)
@@ -315,7 +399,7 @@ Workflow JS (编排器)
   ├─ 子代理 → A_llm_instr 指令隐藏能力检测 (并行)
   └─ 子代理 → LLM Judge (CoT + xhigh)
               ├─ 输入: Phi(s) 证据 + LLM 提取结果 + 原始内容
-              └─ 输出: verdict + confidence + reasoning
+              └─ 输出: verdict + confidence + reasoning + intent_category
 ```
 
 ---
@@ -383,10 +467,16 @@ flowchart LR
 
 ## 八、验证结果
 
-| 用例 | 类型 | 技术 | 判定 | 正确 |
-|------|------|------|------|:----:|
-| 000-jeremy | Python dropper | 下载→执行恶意二进制 | malware (0.90) | ✓ |
-| ai-wrapper-product | JS 反向 Shell | ngrok C2 + socket 管道 | malware (0.90) | ✓ |
+基于 `std-cases-4` 四个用例（模式 A 确定性管线，`npm run batch`）：
+
+| 用例 | 类型 | 技术 | 判定 | 期望 | 正确 |
+|------|------|------|------|------|:----:|
+| 000-jeremy | Python dropper | 下载→执行恶意二进制 | malware (0.90) | malware | ✓ |
+| ai-wrapper-product | JS 反向 Shell | ngrok C2 + socket 管道 | malware (0.90) | malware | ✓ |
+| 2captcha | 良性 | 常规验证码服务 | benign (0.70) | benign | ✓ |
+| 1password-1 | 良性 | 密码管理 CLI | malware (0.80) | benign | ✗ 误报 |
+
+> **已知误报**：1password-1 是良性密码管理器，但诚实声明了读凭证能力，被确定性规则 `rule_3`（凭证窃取）误判为 malware。这正是安全类 skill 声明敏感能力导致的误报问题，与 `docs/my-approach-design.md` 中的 V_decl 误报防护方案相关（见修改计划 Phase 3.1）。
 
 ---
 

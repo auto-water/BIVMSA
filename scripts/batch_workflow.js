@@ -50,13 +50,6 @@ The output is a single JSON object. Output ONLY that JSON object.`,
   }
 }
 
-// Strips a leading/trailing markdown code fence from agent output, if present.
-function stripFence(text) {
-  const t = (text || '').trim();
-  const m = t.match(/^```[\w-]*\n([\s\S]*?)\n```$/);
-  return m ? m[1].trim() : t;
-}
-
 // Extracts the first JSON object from agent output (strips markdown fences,
 // leading prose, trailing text). Returns null if nothing parses.
 function parseJsonOutput(raw) {
@@ -115,6 +108,15 @@ ${fmtFlows(det.flows)}
 ### Deterministic Verdict: ${JSON.stringify(det._det_verdict || {})}`;
 }
 
+// Ground truth comes from the path segment (std-cases-4: benign/ malware/).
+// Never read a .expected file — it leaks the label into the audit context.
+function deriveClass(caseDir) {
+  const parts = (caseDir || '').split('/');
+  if (parts.includes('benign')) return 'benign';
+  if (parts.includes('malware')) return 'malware';
+  return 'unknown';
+}
+
 // =============================================================================
 // Phase 1: Discover cases
 // =============================================================================
@@ -133,7 +135,7 @@ const caseDirs = await (async () => {
   const result = await (() => {
     // Use bash to find cases
     return agent(
-      'Run this shell command and return the output exactly: find experiment/cases -maxdepth 2 -name SKILL.md | sort',
+      'Run this shell command and return the output exactly: find experiment/cases -name SKILL.md | sort',
       { label: 'discover-cases' }
     );
   })();
@@ -168,36 +170,24 @@ const results = await pipeline(
     const caseName = caseDir.split('/').pop();
     log(`[${caseName}] Starting audit...`);
 
-    // --- Step 1: Read skill content ---
-    const skillPath = `${caseDir}/SKILL.md`;
-    const rawSkill = await agent(
-      `Read the file at ${skillPath} and output its complete content verbatim. Do not add commentary.`,
-      { label: `read-${caseName}` }
-    );
+    // --- Step 1: Parse the skill via the stable Python parser ---
+    // Shares the same parsing logic (frontmatter/body/name/scripts) as the
+    // deterministic pipeline and single-case workflow. See scripts/skill_parse.py.
+    const parsedSkill = parseJsonOutput(await agent(
+      `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences:
 
-    // Detect read failure by content shape, not keyword. Subagents sometimes
-    // wrap the file in a markdown code fence or add brief prose, so strip a
-    // leading/trailing fence first, then require a YAML frontmatter marker
-    // (`---` or `name:`) to confirm a real SKILL.md was read. Genuine read
-    // errors (file missing / permission denied / tool error) won't contain
-    // those markers, while skill bodies may legitimately contain the word
-    // "Error" (e.g. error handling tables, `throw new Error(...)` in code).
-    const skillContent = stripFence(rawSkill);
-    const looksLikeSkill =
-      skillContent.length >= 20 &&
-      (skillContent.includes('---') || /^\s*name\s*:/m.test(skillContent));
-    if (!looksLikeSkill) {
-      log(`[${caseName}] ERROR: Cannot read SKILL.md`);
-      return { case: caseName, error: 'Cannot read SKILL.md' };
+python scripts/skill_parse.py ${caseDir}
+
+The output is a single JSON object. Output ONLY that JSON object.`,
+      { label: `parse-${caseName}` }
+    ));
+    if (!parsedSkill || parsedSkill.error || !parsedSkill.body) {
+      log(`[${caseName}] ERROR: Cannot parse skill (${(parsedSkill && parsedSkill.error) || 'skill_parse failed'})`);
+      return { case: caseName, case_dir: caseDir, class: deriveClass(caseDir), error: (parsedSkill && parsedSkill.error) || 'Cannot parse skill' };
     }
-
-    // Parse skill name from frontmatter
-    const nameMatch = skillContent.match(/^---\nname:\s*(.+?)$/m);
-    const skillName = nameMatch ? nameMatch[1].trim() : caseName;
-
-    // Extract body (after frontmatter)
-    const parts = skillContent.split('---', 3);
-    const bodyContent = parts.length >= 3 ? parts[2].trim() : skillContent;
+    const skillName = parsedSkill.name || caseName;
+    const bodyContent = parsedSkill.body || '';
+    const skillContent = parsedSkill.content_full || '';
 
     // --- Step 2: Run deterministic Python pipeline (Φ(s) evidence) ---
     log(`[${caseName}] Running deterministic pipeline...`);
@@ -399,6 +389,8 @@ Overly broad permissions without hidden code → usually benign.`,
 
     return {
       case: caseName,
+      case_dir: caseDir,
+      class: deriveClass(caseDir),
       skill_name: skillName,
       verdict: judgeResult?.verdict || 'error',
       confidence: judgeResult?.confidence || 0,
@@ -438,24 +430,13 @@ const errors = results.filter(r => r && r.error);
 const malware = valid.filter(r => r.verdict === 'malware');
 const benign = valid.filter(r => r.verdict === 'benign');
 
-// Read expected labels
-const expectedResults = await Promise.all(valid.map(async (r) => {
-  const expPath = `experiment/cases/${r.case}/.expected`;
-  try {
-    const exp = await agent(
-      `Read the file ${expPath} and output ONLY the single word "malware" or "benign". Do not add commentary.`,
-      { label: `read-expected-${r.case}` }
-    );
-    const expected = (exp || '').trim().toLowerCase();
-    r.expected = expected;
-    r.match = expected === r.verdict;
-    return r;
-  } catch (e) {
-    r.expected = 'unknown';
-    r.match = null;
-    return r;
-  }
-}));
+// Ground truth comes from the path segment (std-cases-4: benign/ malware/).
+// Never read .expected — that would leak the label into the audit context.
+const expectedResults = valid.map((r) => {
+  r.expected = (r.class && r.class !== 'unknown') ? r.class : 'unknown';
+  r.match = r.expected === r.verdict;
+  return r;
+});
 
 const matched = expectedResults.filter(r => r.match === true);
 const mismatched = expectedResults.filter(r => r.match === false);
@@ -508,5 +489,31 @@ ${reportJson}`,
 } catch (e) {
   log(`Warning: could not write ${outputFile}: ${e}`);
 }
+
+// --- Write per-case results mirroring the cases directory structure ---
+// Each case gets experiment/results/<rel>/result.json where <rel> is the case
+// path relative to experiment/cases/ (e.g. std-cases-4/benign/<skill>).
+const casesRoot = 'experiment/cases/';
+const resultsRoot = (args && args.results_dir) || 'experiment/results';
+await Promise.all(reportResults.map(async (r) => {
+  const rel = r.case_dir && r.case_dir.startsWith(casesRoot)
+    ? r.case_dir.slice(casesRoot.length)
+    : `${r.class || 'unknown'}/${r.case}`;
+  const outPath = `${resultsRoot}/${rel}/result.json`;
+  const parentDir = outPath.replace(/\/[^/]+$/, '');
+  try {
+    await agent(
+      `Write the JSON content below to the file at ${outPath}.
+First create the parent directory (mkdir -p "${parentDir}") if it does not exist.
+Output ONLY the single word "ok" on success. Do not modify the JSON content.
+
+${JSON.stringify(r, null, 2)}`,
+      { label: `write-${r.case}` }
+    );
+    log(`Results written to ${outPath}`);
+  } catch (e) {
+    log(`Warning: could not write ${outPath}: ${e}`);
+  }
+}));
 
 return { summary, results: reportResults, output_file: outputFile };

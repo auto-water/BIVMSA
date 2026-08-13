@@ -28,3 +28,7 @@ Desktop.ini
 # Claude
 .claude/
 result.json
+
+# Experiment runtime outputs (batch results & traces) — never committed
+experiment/results/*
+!experiment/results/.gitkeep
