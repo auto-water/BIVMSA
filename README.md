@@ -40,15 +40,23 @@
 
 ### 2.2 Python 依赖
 
-```bash
-# 核心依赖
-pip install pyyaml        # YAML frontmatter 解析
+三种模式共用确定性核心依赖；LLM 全流程额外需要 openai + python-dotenv。
 
-# 多语言 AST 解析 (污点分析)
+```bash
+# 一键安装全部依赖
+pip install -r requirements.txt
+
+# 或分步安装：
+# 核心依赖 (所有模式必需)
+pip install pyyaml        # YAML frontmatter 解析
 pip install tree-sitter
 pip install tree-sitter-javascript
 pip install tree-sitter-typescript
 pip install tree-sitter-bash
+
+# LLM 全流程额外依赖 (Python 确定性模式 / Workflow 模式不需要)
+pip install openai        # OpenAI 兼容 LLM 客户端
+pip install python-dotenv # .env 配置加载
 ```
 
 验证安装：
@@ -58,7 +66,28 @@ python -c "import yaml; print('pyyaml OK')"
 python -c "from tree_sitter import Parser; print('tree-sitter OK')"
 python -c "import tree_sitter_javascript; print('JS OK')"
 python -c "import tree_sitter_bash; print('Bash OK')"
+python -c "import openai; print('openai OK')"   # LLM 全流程需要
 ```
+
+### 2.4 LLM 接口配置 (.env)
+
+LLM 全流程通过 `.env` 配置业务 LLM 接口（OpenAI 兼容格式）：
+
+```bash
+cp .env.example .env      # 然后编辑 .env 填充实际值
+```
+
+`.env` 字段：
+
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `LLM_BASE_URL` | 业务 LLM 接口地址 | `https://api.deepseek.com` 或 `http://<host>:<port>/v1` |
+| `LLM_API_KEY` | 接口 API Key | `sk-...` |
+| `LLM_MODEL` | 模型名 | `Qwen3-32B-V1` / `MiniMax-M2.7` / `deepseek-v4-flash` |
+| `LLM_MAX_TOKENS` | 最大生成 tokens（Judge 需较大预算） | `8192` |
+| `LLM_MAX_RETRIES` | 解析/校验失败重试次数 | `3` |
+
+`.env` 已加入 `.gitignore`，不会提交到仓库。
 
 ### 2.3 项目结构
 
@@ -66,6 +95,8 @@ python -c "import tree_sitter_bash; print('Bash OK')"
 MAS4MalSkill/
 ├── package.json              # npm scripts
 ├── README.md                 # 本文档
+├── requirements.txt          # Python 依赖 (核心 + LLM)
+├── .env.example              # LLM 接口配置模板 (复制为 .env)
 ├── docs/
 │   ├── skill-scanner/        # 旧版 scanner 参考文档
 │   └── BIV-SYSTEM-DOCS.md    # 完整系统文档 (mermaid 图)
@@ -80,12 +111,16 @@ MAS4MalSkill/
 │   ├── deviation.py          # Module 3: 偏差检测 + compound flags
 │   ├── root_cause.py         # Module 4: 15条规则 + LLM 分类器
 │   ├── malicious_detect.py   # Module 5: Relaxed-Veto + LLM Judge
-│   └── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
+│   ├── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
+│   ├── llm_config.py         # [模式C] .env 配置加载
+│   ├── llm_client.py         # [模式C] OpenAI 兼容 LLM 客户端
+│   └── pipeline_llm.py       # [模式C] LLM 全流程编排
 ├── scripts/
-│   ├── biv_audit.py          # 单 skill 审计 (--evidence 精简模式)
-│   ├── batch_audit.py        # 批量确定性审计
-│   ├── biv_workflow.js       # LLM 单 case 审计 (打通确定性证据)
-│   └── batch_workflow.js     # LLM 批量审计 (打通确定性证据)
+│   ├── biv_audit.py          # [模式A] 单 skill 审计 (--evidence 精简模式)
+│   ├── batch_audit.py        # [模式A] 批量确定性审计
+│   ├── batch_llm.py          # [模式C] 批量 LLM 审计 (业务主机)
+│   ├── biv_workflow.js       # [模式B] LLM 单 case 审计 (Claude Agent)
+│   └── batch_workflow.js     # [模式B] LLM 批量审计 (Claude Agent)
 └── experiment/cases/         # 测试用例
 ```
 
@@ -235,9 +270,21 @@ experiment/cases/
 
 ---
 
-## 五、使用方法
+## 五、使用方法 — 三种模式
 
-### 5.1 单 skill 审计 (确定性，无 LLM)
+| 模式 | LLM 调用 | 运行环境 | 适用场景 |
+|------|---------|---------|---------|
+| **A. Python 确定性模式** | 无 | 任意主机（含业务主机） | 快速预筛、CI、无 LLM 环境 |
+| **B. Workflow 全流程** | Claude Agent | Claude Code 运行时 | 开发/审计时用最强模型推理 |
+| **C. LLM 全流程** | 业务 LLM 接口 | 任意主机 + `.env` 配置 | 业务主机上线，OpenAI 兼容接口 |
+
+三种模式**共用同一套确定性核心**（taxonomy / AST 污点 / 规则引擎 / Relaxed-Veto），仅 LLM 调用层不同。
+
+---
+
+### 模式 A：Python 确定性模式（无 LLM，任意主机）
+
+单 skill 审计：
 
 ```bash
 # 完整确定性结果 (phases + trace + LLM prompts)
@@ -246,16 +293,11 @@ python scripts/biv_audit.py <skill-directory>
 # 输出 JSON 到文件
 python scripts/biv_audit.py <skill-directory> --output result.json
 
-# 精简 Phi(s) 证据 (供 LLM Workflow 消费)
+# 精简 Phi(s) 证据 (供 Workflow/LLM 全流程消费)
 python scripts/biv_audit.py <skill-directory> --evidence
-
-# 或通过 npm
-npm run audit:jeremy
 ```
 
-`--evidence` 模式输出紧凑的确定性结论（D/U/O、compound_flags、rule_engine、relaxed_veto、_det_verdict），是 Workflow 脚本调用 Python 管线的接口。
-
-### 5.2 批量审计 (确定性)
+批量审计：
 
 ```bash
 # 终端汇总表
@@ -268,15 +310,27 @@ npm run batch:json
 python scripts/batch_audit.py --verbose
 ```
 
-### 5.3 完整含 LLM 审计 (Claude Code)
+`--evidence` 输出紧凑确定性结论（D/U/O、compound_flags、rule_engine、relaxed_veto、_det_verdict），是模式 B/C 调用 Python 管线的接口。
 
-LLM 调用必须运行在 Claude Code 运行时内。Workflow 脚本通过**子代理调用 Python 确定性管线**获取 `Phi(s)` 精简证据，再注入 LLM Judge：
+冒烟测试：
 
+```bash
+npm run test:smoke
+# PASS: jeremy
+# PASS: ai-wrapper
 ```
-# 单 case
+
+---
+
+### 模式 B：Workflow 全流程（Claude Agent，Claude Code 运行时）
+
+LLM 调用通过 Claude Agent 执行，脚本通过**子代理调用 Python 确定性管线**获取 `Phi(s)` 精简证据，再注入 LLM Judge：
+
+```js
+// 单 case
 Workflow({scriptPath: "scripts/biv_workflow.js", args: {skill_dir: "..."}})
 
-# 批量
+// 批量
 Workflow({scriptPath: "scripts/batch_workflow.js"})
 ```
 
@@ -294,14 +348,41 @@ Workflow JS (编排器)
               └─ 输出: verdict + confidence + reasoning
 ```
 
-Judge 的 prompt 明确要求"**Weigh deterministic evidence heavily**"——compound flags（rce_chain 恶意先验 86%）、未声明高风险能力、规则引擎结论是强信号。
+---
 
-### 5.4 冒烟测试
+### 模式 C：LLM 全流程（业务 LLM 接口，任意主机）
+
+通过 OpenAI 兼容接口调用业务 LLM（Qwen3-32B-V1 / MiniMax-M2.7 / deepseek 等），**不依赖 Claude Code**。需要先配置 `.env`（见 2.4 节）。
 
 ```bash
-npm run test:smoke
-# PASS: jeremy
-# PASS: ai-wrapper
+# 单 skill 审计
+python scripts/batch_llm.py --single <skill-directory> --verbose
+
+# 批量审计 (终端汇总表)
+python scripts/batch_llm.py --verbose
+
+# 批量审计 (JSON 到文件)
+python scripts/batch_llm.py --output batch-llm-result.json
+```
+
+或通过 npm：
+
+```bash
+npm run llm:single -- experiment/cases/<skill>   # 单 case
+npm run llm:batch                                # 批量
+npm run llm:json                                 # 批量 → JSON
+```
+
+**每个 case 的 LLM 调用链**（与模式 B 一致，仅 LLM 传输方式不同）：
+
+```
+pipeline_llm.py (Python 编排器)
+  ├─ run_deterministic_pipeline() → Phi(s) 证据
+  ├─ D_llm: 语义声明能力提取 (复用 prompt builder + 3重幻觉控制)
+  ├─ A_llm_instr: 指令隐藏能力检测 (复用)
+  ├─ LLM Classifier: 仅当 15 条规则未命中时
+  └─ LLM Judge: 合并 D/A/U/O + flows + compound_flags + root_cause
+     └─ 输出: verdict + confidence (LLM 全失败时降级 _det_verdict)
 ```
 
 ---
