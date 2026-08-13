@@ -77,9 +77,15 @@ def main():
     # Single-skill mode
     if single_dir:
         r = run_full_audit(single_dir, client=client, verbose=verbose)
-        _emit(json.dumps(r, ensure_ascii=False, indent=2))
-        if output_path:
-            Path(output_path).write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not output_path:
+            results_dir = Path(__file__).resolve().parent.parent / "experiment" / "results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            case_name = Path(single_dir).name
+            output_path = results_dir / f"{case_name}.json"
+        Path(output_path).write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not verbose:
+            _emit(json.dumps(r, ensure_ascii=False, indent=2))
+        print(f"\nResults written to {output_path}", file=sys.stderr)
         return
 
     # Batch mode
@@ -151,9 +157,16 @@ def main():
             m = "OK" if r.get("match") else ("MISMATCH" if r.get("match") is False else "?")
             print(f"  [{m}] {r['case']}: {r['verdict']} conf={r['confidence']} src={r['verdict_source']}")
 
-    _emit(json.dumps(batch, ensure_ascii=False, indent=2))
-    if output_path:
-        Path(output_path).write_text(json.dumps(batch, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Default output path: experiment/results/ unless --output is given
+    if not output_path:
+        results_dir = Path(__file__).resolve().parent.parent / "experiment" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        output_path = results_dir / "batch_llm_result.json"
+
+    Path(output_path).write_text(json.dumps(batch, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not verbose:
+        _emit(json.dumps(batch, ensure_ascii=False, indent=2))
+    print(f"\nResults written to {output_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

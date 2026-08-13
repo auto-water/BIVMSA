@@ -449,4 +449,24 @@ for (const r of expectedResults) {
   log(`${matchIcon} ${r.case.padEnd(50)} ${r.verdict.padEnd(8)} conf=${conf}% intent=${r.intent_category}`);
 }
 
-return { summary, results: expectedResults };
+// --- Write results to experiment/results/ (default output path) ---
+// The Workflow script has no filesystem access, so the file is written by a
+// subagent. Override the output path via args.output or args.results_file.
+const outputFile = (args && (args.output || args.results_file)) || 'experiment/results/batch_workflow_result.json';
+const reportJson = JSON.stringify({ summary, results: expectedResults }, null, 2);
+
+try {
+  const writeRes = await agent(
+    `Write the JSON content below to the file at ${outputFile}.
+First create the parent directory (mkdir -p experiment/results) if it does not exist.
+Output ONLY the single word "ok" on success. Do not modify the JSON content.
+
+${reportJson}`,
+    { label: 'write-batch-result' }
+  );
+  log(`Results written to ${outputFile}`);
+} catch (e) {
+  log(`Warning: could not write ${outputFile}: ${e}`);
+}
+
+return { summary, results: expectedResults, output_file: outputFile };
