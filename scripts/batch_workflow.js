@@ -24,6 +24,13 @@ export const meta = {
 // Helpers: run deterministic Python pipeline and format its evidence
 // =============================================================================
 
+// Intent branch → Chinese name mapping (mirrors taxonomy.INTENT_CATEGORY_NAMES)
+const INTENT_NAMES = {
+  A: '数据窃取与间谍', B: '财务与变现', C: '载荷与基础设施',
+  D: '内容与社会工程', E: '破坏性', F: 'AI Agent 特定',
+  G: '非对抗性', H: '模糊',
+};
+
 // Runs `python scripts/biv_audit.py <caseDir> --evidence` via a subagent and
 // parses the JSON output. Returns null on failure.
 async function runDetPipeline(caseDir) {
@@ -91,9 +98,9 @@ ${fmtList(det.D_det)}
 ### Actual Capabilities A(s) (AST + regex):
 ${fmtList(det.A_merged)}
 ### Undeclared Capabilities U(s) = A - D (HIDDEN POWERS):
-${fmtList(det.U)}
+${fmtList(det.undeclared)}
 ### Overdeclared Capabilities O(s) = D - A (false claims):
-${fmtList(det.O)}
+${fmtList(det.overdeclared)}
 ### Data Flow Chains:
 ${fmtFlows(det.flows)}
 ### Compound Threat Flags (${flagged.length} triggered):
@@ -115,6 +122,12 @@ phase('Discover');
 
 log('Scanning experiment/cases/ for skills...');
 
+// 目标案例过滤:可通过 args 传入,例如 args = { cases: ["ai-wrapper-product__CI_B6"] }
+// 未指定时扫描全部案例
+const targetCases = Array.isArray(args?.cases) && args.cases.length
+  ? args.cases.map(String).filter(Boolean)
+  : null;
+
 // List all directories under experiment/cases/ that contain SKILL.md
 const caseDirs = await (async () => {
   const result = await (() => {
@@ -126,14 +139,22 @@ const caseDirs = await (async () => {
   })();
 
   const lines = (result || '').split('\n').filter(l => l.trim());
-  return lines.map(l => l.replace('/SKILL.md', ''));
+  let dirs = lines.map(l => l.replace('/SKILL.md', ''));
+  if (targetCases) {
+    dirs = dirs.filter(d => targetCases.some(t => d === t || d.endsWith('/' + t)));
+    log(`Targeting ${dirs.length}/${lines.length} case(s): ${dirs.join(', ')}`);
+  }
+  return dirs;
 })();
 
 log(`Found ${caseDirs.length} cases: ${caseDirs.join(', ')}`);
 
 if (caseDirs.length === 0) {
-  log('No cases found. Exiting.');
-  return { summary: { total: 0, message: 'No cases found' } };
+  const reason = targetCases
+    ? `No matching case found for: ${targetCases.join(', ')}`
+    : 'No cases found';
+  log(reason + '. Exiting.');
+  return { summary: { total: 0, message: reason } };
 }
 
 // =============================================================================
@@ -383,6 +404,7 @@ Overly broad permissions without hidden code → usually benign.`,
       confidence: judgeResult?.confidence || 0,
       reasoning: judgeResult?.reasoning || '',
       intent_category: judgeResult?.intent_category || 'H',
+      intent_category_name: INTENT_NAMES[judgeResult?.intent_category] || '',
       key_evidence: judgeResult?.key_evidence || [],
       d_llm_count: dCaps.length,
       d_llm_caps: dCaps,
@@ -392,8 +414,8 @@ Overly broad permissions without hidden code → usually benign.`,
       // Deterministic evidence passed through for downstream aggregation
       det: detEvidence
         ? {
-            U: detEvidence.U || [],
-            O: detEvidence.O || [],
+            U: detEvidence.undeclared || [],
+            O: detEvidence.overdeclared || [],
             compound_flags: detEvidence.compound_flags || {},
             rule_engine: detEvidence.rule_engine || {},
             relaxed_veto: detEvidence.relaxed_veto || {},

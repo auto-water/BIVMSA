@@ -54,7 +54,7 @@ The output is a single JSON object. Output ONLY that JSON object.`,
 })();
 
 if (detEvidence) {
-  log(`Deterministic: U=${(detEvidence.U || []).length}, compound=${JSON.stringify(detEvidence.compound_flags)}, rule=${detEvidence.rule_engine?.rule_id || 'none'}`);
+  log(`Deterministic: U=${(detEvidence.undeclared || []).length}, compound=${JSON.stringify(detEvidence.compound_flags)}, rule=${detEvidence.rule_engine?.rule_id || 'none'}`);
 } else {
   log('Warning: could not obtain deterministic evidence');
 }
@@ -99,9 +99,9 @@ ${fmtCapList(det.D_det)}
 ### Actual Capabilities A(s) (AST + regex):
 ${fmtCapList(det.A_merged)}
 ### Undeclared Capabilities U(s) = A - D (HIDDEN POWERS):
-${fmtCapList(det.U)}
+${fmtCapList(det.undeclared)}
 ### Overdeclared Capabilities O(s) = D - A (false claims):
-${fmtCapList(det.O)}
+${fmtCapList(det.overdeclared)}
 ### Data Flow Chains:
 ${fmtFlows(det.flows)}
 ### Compound Threat Flags (${flagged.length} triggered):
@@ -352,6 +352,13 @@ IMPORTANT:
 // Final Output
 // ---------------------------------------------------------------------------
 
+// Intent branch → Chinese name mapping (mirrors taxonomy.INTENT_CATEGORY_NAMES)
+const INTENT_NAMES = {
+  A: '数据窃取与间谍', B: '财务与变现', C: '载荷与基础设施',
+  D: '内容与社会工程', E: '破坏性', F: 'AI Agent 特定',
+  G: '非对抗性', H: '模糊',
+};
+
 const finalResult = {
   skill_name: skillName,
   skill_dir: skillDir,
@@ -363,12 +370,12 @@ const finalResult = {
   instruction_capabilities: aLlmInstrResult?.instruction_capabilities || [],
   intended_workflow: dLlmResult?.intended_workflow || '',
   judge_intent_category: judgeResult?.intent_category || 'H',
+  judge_intent_category_name: INTENT_NAMES[judgeResult?.intent_category] || '',
   judge_key_evidence: judgeResult?.key_evidence || [],
   // Deterministic evidence passed through for traceability
   deterministic_evidence: detEvidence || null,
   _meta: {
-    timestamp: new Date().toISOString(),
-    workflow_version: '0.2.0',
+    workflow_version: '0.2.1',
   },
 };
 

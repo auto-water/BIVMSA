@@ -295,8 +295,8 @@ def phase2_detect_deviations(
         trace.metric("instruction_signals", instr_count)
 
     return {
-        "U": sorted(U),
-        "O": sorted(O),
+        "undeclared": sorted(U),
+        "overdeclared": sorted(O),
         "compound_flags": compound_flags,
         "phi": phi,
         "risk_assessment": risk_assessment,
@@ -582,6 +582,7 @@ def assemble_final_output(
         "root_cause": {
             "classification": rc_classification,
             "intent_category": rc_branch,
+            "intent_category_name": INTENT_CATEGORY_NAMES.get(rc_branch, ""),
             "intent_leaf": rc_leaf,
             "intent_leaf_description": INTENT_LEAF_DESCRIPTIONS.get(rc_leaf, ""),
             "kill_chain": rc_kill_chain,
@@ -683,8 +684,8 @@ def build_det_evidence(skill_dir: str) -> Dict:
         "A_ast": p1.get("A_ast", []),
         "A_regex": p1.get("A_regex", []),
         "A_merged": sorted(set(p1.get("A_ast", [])) | set(p1.get("A_regex", []))),
-        "U": p2.get("U", []),
-        "O": p2.get("O", []),
+        "undeclared": p2.get("undeclared", []),
+        "overdeclared": p2.get("overdeclared", []),
         "flows": flows_capped,
         "flow_count": len(flows),
         "compound_flags": p2.get("compound_flags", {}),
@@ -756,8 +757,8 @@ def run_deterministic_pipeline(
 
     # Phase 3 deterministic
     phase3_det = phase3_deterministic(
-        set(phase2["U"]),
-        set(phase2["O"]),
+        set(phase2["undeclared"]),
+        set(phase2["overdeclared"]),
         A_det,
         D_det,
         phase1.get("flows_ast", []),
@@ -783,8 +784,8 @@ def run_deterministic_pipeline(
     llm_prompts = build_phase3_llm_prompts(
         phase1["skill_name"],
         phase1["skill_content_full"],
-        set(phase2["U"]),
-        set(phase2["O"]),
+        set(phase2["undeclared"]),
+        set(phase2["overdeclared"]),
         A_det,
         D_det,
         phase1.get("flows_ast", []),

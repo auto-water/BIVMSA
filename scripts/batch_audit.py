@@ -17,14 +17,30 @@ from biv.orchestrator import run_deterministic_pipeline
 
 
 def discover_cases(cases_dir: Path) -> list[Path]:
-    """Find all case directories (containing SKILL.md)."""
+    """Find all case directories (containing SKILL.md).
+
+    Recursively finds SKILL.md at any depth, supporting both layouts:
+    - Flat:   <cases>/<skill>/SKILL.md
+    - Nested: <cases>/std-cases-4/benign/<skill>/SKILL.md  (std-cases-4)
+
+    The class (benign/malware) is derived from the path segment — see
+    _derive_class(); never from a .expected file (label leakage).
+    """
     cases = []
     if not cases_dir.is_dir():
         return cases
-    for entry in sorted(cases_dir.iterdir()):
-        if entry.is_dir() and (entry / "SKILL.md").exists():
-            cases.append(entry)
+    for skill_md in sorted(cases_dir.rglob("SKILL.md")):
+        cases.append(skill_md.parent)
     return cases
+
+
+def _derive_class(case_path: Path) -> str:
+    """Derive ground-truth class from the path (benign/malware segment)."""
+    parts = case_path.parts
+    for seg in reversed(parts):
+        if seg in ("benign", "malware"):
+            return seg
+    return "unknown"
 
 
 def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = None) -> dict:
@@ -59,14 +75,14 @@ def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = Non
         p3 = r.get("phase3_deterministic", {})
         det = r.get("_det_verdict", {})
 
-        # Load expected label from manifest if available
-        expected = "unknown"
-        manifest = case_path / ".expected"
-        if manifest.exists():
-            expected = manifest.read_text().strip().lower()
+        # Ground truth comes from the path (std-cases-4: benign/ malware/).
+        # Never read a .expected file — it leaks the label into the audit context.
+        cls_name = _derive_class(case_path)
+        expected = "unknown" if cls_name == "unknown" else cls_name
 
         result = {
             "case": case_name,
+            "class": cls_name,
             "skill_name": p1.get("skill_name", "unknown"),
             "duration_ms": round((time.time() - t0) * 1000, 1),
             "verdict": det.get("verdict", "error"),
@@ -78,8 +94,8 @@ def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = Non
                 "D_det": len(p1.get("D_deterministic", [])),
                 "A_ast": len(p1.get("A_ast", [])),
                 "A_regex": len(p1.get("A_regex", [])),
-                "U_count": len(p2.get("U", [])),
-                "O_count": len(p2.get("O", [])),
+                "U_count": len(p2.get("undeclared", [])),
+                "O_count": len(p2.get("overdeclared", [])),
                 "flows": len(p1.get("flows_ast", [])),
             },
             "compound_flags": {k: v for k, v in p2.get("compound_flags", {}).items() if v},
