@@ -43,6 +43,13 @@ The output is a single JSON object. Output ONLY that JSON object.`,
   }
 }
 
+// Strips a leading/trailing markdown code fence from agent output, if present.
+function stripFence(text) {
+  const t = (text || '').trim();
+  const m = t.match(/^```[\w-]*\n([\s\S]*?)\n```$/);
+  return m ? m[1].trim() : t;
+}
+
 // Extracts the first JSON object from agent output (strips markdown fences,
 // leading prose, trailing text). Returns null if nothing parses.
 function parseJsonOutput(raw) {
@@ -142,17 +149,23 @@ const results = await pipeline(
 
     // --- Step 1: Read skill content ---
     const skillPath = `${caseDir}/SKILL.md`;
-    const skillContent = await agent(
+    const rawSkill = await agent(
       `Read the file at ${skillPath} and output its complete content verbatim. Do not add commentary.`,
       { label: `read-${caseName}` }
     );
 
-    // Detect read failure by content shape, not keyword: a successful read of a
-    // SKILL.md always starts with YAML frontmatter ("---"). Genuine read errors
-    // (file missing / permission denied / tool error) won't start with "---",
-    // while skill bodies may legitimately contain the word "Error" (e.g. error
-    // handling tables, `throw new Error(...)` in embedded code).
-    if (!skillContent || !skillContent.trim().startsWith('---')) {
+    // Detect read failure by content shape, not keyword. Subagents sometimes
+    // wrap the file in a markdown code fence or add brief prose, so strip a
+    // leading/trailing fence first, then require a YAML frontmatter marker
+    // (`---` or `name:`) to confirm a real SKILL.md was read. Genuine read
+    // errors (file missing / permission denied / tool error) won't contain
+    // those markers, while skill bodies may legitimately contain the word
+    // "Error" (e.g. error handling tables, `throw new Error(...)` in code).
+    const skillContent = stripFence(rawSkill);
+    const looksLikeSkill =
+      skillContent.length >= 20 &&
+      (skillContent.includes('---') || /^\s*name\s*:/m.test(skillContent));
+    if (!looksLikeSkill) {
       log(`[${caseName}] ERROR: Cannot read SKILL.md`);
       return { case: caseName, error: 'Cannot read SKILL.md' };
     }
@@ -452,8 +465,13 @@ for (const r of expectedResults) {
 // --- Write results to experiment/results/ (default output path) ---
 // The Workflow script has no filesystem access, so the file is written by a
 // subagent. Override the output path via args.output or args.results_file.
+// Error cases are included in the report so no case is silently dropped.
 const outputFile = (args && (args.output || args.results_file)) || 'experiment/results/batch_workflow_result.json';
-const reportJson = JSON.stringify({ summary, results: expectedResults }, null, 2);
+const reportResults = [
+  ...expectedResults,
+  ...errors.map(e => ({ ...e, expected: 'unknown', match: null })),
+];
+const reportJson = JSON.stringify({ summary, results: reportResults }, null, 2);
 
 try {
   const writeRes = await agent(
@@ -469,4 +487,4 @@ ${reportJson}`,
   log(`Warning: could not write ${outputFile}: ${e}`);
 }
 
-return { summary, results: expectedResults, output_file: outputFile };
+return { summary, results: reportResults, output_file: outputFile };
