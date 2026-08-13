@@ -17,7 +17,6 @@ Flow:
 6. final_verdict(veto, judge)
 """
 
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -146,10 +145,10 @@ def run_full_audit(
 
     model_name = cfg.model if cfg else "unknown"
 
-    # --- Phase 1+2+3 deterministic ---
+    # --- Phase 1+2+3 deterministic (trace written to trace_dir by the pipeline) ---
     if verbose:
         logger.info("Running deterministic pipeline...")
-    result = run_deterministic_pipeline(str(skill_path))
+    result = run_deterministic_pipeline(str(skill_path), trace_dir=trace_dir)
     if "error" in result:
         return result
 
@@ -420,20 +419,10 @@ def run_full_audit(
         },
     }
 
-    # --- Separate trace: write to file if trace_dir given, else discard ---
-    trace_data = result.get("trace")
-    trace_summary = result.get("trace_summary", "")
-    if trace_dir and trace_data is not None:
-        trace_dir_path = Path(trace_dir)
-        trace_dir_path.mkdir(parents=True, exist_ok=True)
-        trace_file = trace_dir_path / f"{skill_path.name}_trace.json"
-        try:
-            trace_file.write_text(
-                json.dumps(trace_data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            audit_result["_meta"]["trace_file"] = str(trace_file)
-        except OSError as e:
-            logger.warning(f"Cannot write trace file {trace_file}: {e}")
-    audit_result["_meta"]["trace_summary"] = trace_summary or None
+    # --- Trace is already separated by run_deterministic_pipeline into a file.
+    # Reference it via _meta; never embed trace records in the result. ---
+    det_meta = result.get("_meta", {})
+    audit_result["_meta"]["trace_file"] = det_meta.get("trace_file")
+    audit_result["_meta"]["trace_summary"] = det_meta.get("trace_summary") or None
 
     return audit_result

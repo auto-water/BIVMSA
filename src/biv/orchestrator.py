@@ -702,14 +702,21 @@ def build_det_evidence(skill_dir: str) -> Dict:
 # =============================================================================
 
 
-def run_deterministic_pipeline(skill_dir: str, trace: Optional[TraceContext] = None) -> Dict:
+def run_deterministic_pipeline(
+    skill_dir: str,
+    trace: Optional[TraceContext] = None,
+    trace_dir: Optional[str] = None,
+) -> Dict:
     """Run the full deterministic pipeline and return intermediate results.
 
     This is the main entry point called from the CLI or Workflow script.
     It runs phases 1+2+3(deterministic part) and returns everything needed
     for the Workflow script to make LLM calls.
 
-    If trace is not provided, a new TraceContext is created automatically.
+    Trace separation: the TraceContext debug records are NEVER embedded in the
+    returned result. If trace_dir is given, they are written to
+    <trace_dir>/<skill>_trace.json and referenced via result._meta.trace_file;
+    otherwise they are discarded (result._meta.trace_file = None).
     """
     skill_path = Path(skill_dir).resolve()
     if not skill_path.is_dir():
@@ -806,19 +813,40 @@ def run_deterministic_pipeline(skill_dir: str, trace: Optional[TraceContext] = N
     trace.finalize(det_verdict, det_confidence)
     trace.metric("pipeline_total_ms", (time.time() - t_pipeline_start) * 1000)
 
+    # --- Trace separation: write to file if trace_dir given, else discard ---
+    trace_data = trace.to_dict()
+    trace_summary = trace.summary()
+    trace_file = None
+    if trace_dir:
+        td = Path(trace_dir)
+        td.mkdir(parents=True, exist_ok=True)
+        trace_file = td / f"{skill_path.name}_trace.json"
+        try:
+            trace_file.write_text(
+                json.dumps(trace_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            logger.warning(f"Cannot write trace file {trace_file}: {e}")
+            trace_file = None
+
     return {
+        # --- Result (audit data; trace NOT mixed in) ---
         "phase1": phase1,
         "phase2": phase2,
         "phase3_deterministic": phase3_det,
         "llm_prompts": llm_prompts,
         "finding_counts": severity_counts,
-        "trace": trace.to_dict(),
-        "trace_summary": trace.summary(),
         # Deterministic-only verdict (for debugging; final verdict requires LLM Judge)
         "_det_verdict": {
             "verdict": det_verdict,
             "confidence": det_confidence,
             "source": det_source,
+        },
+        # --- Debug metadata: trace file reference + summary only ---
+        "_meta": {
+            "timestamp": datetime.now().isoformat(),
+            "trace_file": str(trace_file) if trace_file else None,
+            "trace_summary": trace_summary,
         },
     }
 

@@ -27,8 +27,12 @@ def discover_cases(cases_dir: Path) -> list[Path]:
     return cases
 
 
-def run_batch(cases_dir: str, verbose: bool = False) -> dict:
-    """Run BIV audit against all cases and return aggregated results."""
+def run_batch(cases_dir: str, verbose: bool = False, trace_dir: str | None = None) -> dict:
+    """Run BIV audit against all cases and return aggregated results.
+
+    Trace is separated: if trace_dir is given, each case's trace is written to
+    <trace_dir>/<case>_trace.json; the aggregated results never embed trace.
+    """
     cases = discover_cases(Path(cases_dir))
 
     if not cases:
@@ -42,7 +46,7 @@ def run_batch(cases_dir: str, verbose: bool = False) -> dict:
         t0 = time.time()
 
         try:
-            r = run_deterministic_pipeline(str(case_path))
+            r = run_deterministic_pipeline(str(case_path), trace_dir=trace_dir)
         except Exception as e:
             results.append({
                 "case": case_name,
@@ -128,10 +132,13 @@ def run_batch(cases_dir: str, verbose: bool = False) -> dict:
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     output_path = None
+    trace_dir = None
 
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == "--output" and i < len(sys.argv) - 1:
             output_path = sys.argv[i + 1]
+        if arg == "--trace-dir" and i < len(sys.argv) - 1:
+            trace_dir = sys.argv[i + 1]
 
     cases_dir = Path(__file__).resolve().parent.parent / "experiment" / "cases"
 
@@ -139,7 +146,7 @@ def main():
         print(f"Scanning: {cases_dir}")
         print()
 
-    batch_result = run_batch(str(cases_dir), verbose=verbose)
+    batch_result = run_batch(str(cases_dir), verbose=verbose, trace_dir=trace_dir)
 
     if verbose:
         print()

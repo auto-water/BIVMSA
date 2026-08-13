@@ -48,12 +48,13 @@ def _emit(output: str) -> None:
 def main():
     args = sys.argv[1:]
     if not args:
-        print("Usage: biv_audit.py <skill-directory> [--output <json-path>] [--evidence]", file=sys.stderr)
+        print("Usage: biv_audit.py <skill-directory> [--output <json-path>] [--evidence] [--trace-dir <dir>]", file=sys.stderr)
         sys.exit(1)
 
     skill_dir = args[0]
     output_path = None
     evidence_only = False
+    trace_dir = None
 
     i = 1
     while i < len(args):
@@ -63,13 +64,16 @@ def main():
         elif args[i] == "--evidence":
             evidence_only = True
             i += 1
+        elif args[i] == "--trace-dir" and i + 1 < len(args):
+            trace_dir = args[i + 1]
+            i += 2
         else:
             i += 1
 
     if evidence_only:
         result = build_det_evidence(skill_dir)
     else:
-        result = run_deterministic_pipeline(skill_dir)
+        result = run_deterministic_pipeline(skill_dir, trace_dir=trace_dir)
 
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
