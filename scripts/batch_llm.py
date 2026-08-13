@@ -74,12 +74,16 @@ def main():
 
     client = LLMClient(cfg)
 
+    # Default results directory (trace files go here too)
+    results_dir = Path(__file__).resolve().parent.parent / "experiment" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     # Single-skill mode
     if single_dir:
-        r = run_full_audit(single_dir, client=client, verbose=verbose)
+        r = run_full_audit(
+            single_dir, client=client, verbose=verbose, trace_dir=str(results_dir)
+        )
         if not output_path:
-            results_dir = Path(__file__).resolve().parent.parent / "experiment" / "results"
-            results_dir.mkdir(parents=True, exist_ok=True)
             case_name = Path(single_dir).name
             output_path = results_dir / f"{case_name}.json"
         Path(output_path).write_text(json.dumps(r, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -105,7 +109,9 @@ def main():
         case_name = case_path.name
         if verbose:
             print(f"--- {case_name} ---", flush=True)
-        r = run_full_audit(str(case_path), client=client, verbose=verbose)
+        r = run_full_audit(
+            str(case_path), client=client, verbose=verbose, trace_dir=str(results_dir)
+        )
         r["case"] = case_name
 
         # expected label
@@ -159,8 +165,6 @@ def main():
 
     # Default output path: experiment/results/ unless --output is given
     if not output_path:
-        results_dir = Path(__file__).resolve().parent.parent / "experiment" / "results"
-        results_dir.mkdir(parents=True, exist_ok=True)
         output_path = results_dir / "batch_llm_result.json"
 
     Path(output_path).write_text(json.dumps(batch, ensure_ascii=False, indent=2), encoding="utf-8")

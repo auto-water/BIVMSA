@@ -17,7 +17,9 @@ Flow:
 6. final_verdict(veto, judge)
 """
 
+import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -111,12 +113,18 @@ def run_full_audit(
     skill_dir: str,
     client: Optional[LLMClient] = None,
     verbose: bool = False,
+    trace_dir: Optional[str] = None,
 ) -> Dict:
     """Run the full BIV audit with LLM calls against the business endpoint.
 
-    Returns the final verdict plus all intermediate evidence. On config error,
-    returns {"error": ...}. On LLM total failure, falls back to deterministic
-    verdict (_det_verdict) so the pipeline still produces a result.
+    Returns a CLEAN audit result (no trace records) — verdict + full evidence
+    chain. On config error, returns {"error": ...}. On LLM total failure,
+    falls back to deterministic verdict (_det_verdict).
+
+    Trace (debug log) is separated from the result:
+    - if trace_dir is given, the full trace is written to
+      <trace_dir>/<skill>_trace.json and referenced via result._meta.trace_file
+    - otherwise trace is discarded (never mixed into the result)
     """
     skill_path = Path(skill_dir).resolve()
     if not skill_path.is_dir():
@@ -299,27 +307,102 @@ def run_full_audit(
             "key_evidence": [],
         }
 
-    return {
+    # --- Assemble CLEAN audit result (verdict + full evidence chain) ---
+    # Trace is separated: written to a file if trace_dir is given, never mixed in.
+
+    now_iso = datetime.now().isoformat()
+
+    # Evidence sources: declared (deterministic + LLM) and actual (AST/regex/LLM)
+    declared_sources = phase1.get("d_det_evidence", []) + list(d_llm_evidence)
+    actual_sources = []
+    for cap in sorted(A_ast):
+        actual_sources.append(
+            {
+                "capability": cap,
+                "source_type": "ast",
+                "location": "(AST taint analysis)",
+                "evidence": "Detected via AST taint analysis",
+            }
+        )
+    for cap in sorted(A_regex):
+        actual_sources.append(
+            {
+                "capability": cap,
+                "source_type": "regex",
+                "location": "(deterministic pattern matching)",
+                "evidence": "Detected via regex rule engine",
+            }
+        )
+    actual_sources.extend(list(a_llm_evidence))
+
+    # Findings (regex + AST findings with ids)
+    findings = []
+    all_findings_raw = phase1.get("regex_findings", []) + phase1.get("ast_findings", [])
+    for i, f in enumerate(all_findings_raw):
+        findings.append(
+            {
+                "id": f"FINDING-{i + 1:03d}",
+                "type": f.get("type", ""),
+                "severity": f.get("severity", "medium"),
+                "category": f.get("category", ""),
+                "location": f.get("location", ""),
+                "description": f.get("description", ""),
+                "evidence": f.get("evidence", ""),
+                "capability_mapped": (f.get("capabilities_mapped") or [None])[0]
+                if isinstance(f.get("capabilities_mapped"), list)
+                else None,
+            }
+        )
+
+    urls = phase1.get("urls", {})
+
+    audit_result = {
         "skill_name": skill_name,
         "skill_dir": str(skill_path),
         "verdict": verdict,
         "confidence": round(confidence, 4),
         "verdict_source": verdict_source,
         "verdict_reasoning": judge_result.get("reasoning", ""),
+        "timestamp": now_iso,
         "model": model_name,
-        "deterministic": {
-            "D_det": sorted(D_det),
-            "A_ast": sorted(A_ast),
-            "A_regex": sorted(A_regex),
-            "U": sorted(U),
-            "O": sorted(O),
+        # ---- Evidence chain (necessary to reproduce / audit the verdict) ----
+        "evidence": {
+            "capabilities": {
+                "declared": sorted(D_all),
+                "actual": sorted(A_all),
+                "undeclared": sorted(U),
+                "overdeclared": sorted(O),
+                "declared_sources": declared_sources,
+                "actual_sources": actual_sources,
+            },
             "flows": flows,
             "compound_flags": phase2["compound_flags"],
-            "rule_engine": rule_eng,
-            "relaxed_veto": veto,
-            "_det_verdict": result.get("_det_verdict", {}),
+            "rule_engine": {
+                "matched": rule_eng.get("matched", False),
+                "rule_id": rule_eng.get("rule_id"),
+                "intent_leaf": rule_eng.get("intent_leaf"),
+                "intent_category": rule_eng.get("intent_category"),
+                "kill_chain": rule_eng.get("kill_chain"),
+            },
+            "relaxed_veto": {
+                "fired": veto.get("fired", False),
+                "reason": veto.get("reason") if veto.get("fired") else None,
+                "compound_flag": veto.get("compound_flag") if veto.get("fired") else None,
+                "high_risk_capability": veto.get("high_risk_capability")
+                if veto.get("fired")
+                else None,
+            },
+            "det_verdict": result.get("_det_verdict", {}),
+            "findings": findings,
+            "finding_counts": finding_counts,
+            "urls": {
+                "total": urls.get("total", 0),
+                "untrusted_count": urls.get("untrusted_count", 0),
+                "untrusted": urls.get("untrusted", []),
+            },
         },
-        "llm": {
+        # ---- LLM extraction evidence ----
+        "llm_evidence": {
             "D_llm": sorted(D_llm),
             "D_llm_evidence": d_llm_evidence,
             "D_llm_rejected": d_llm_rejected,
@@ -330,6 +413,27 @@ def run_full_audit(
             "judge": judge_result,
         },
         "root_cause": root_cause,
-        "finding_counts": finding_counts,
-        "trace_summary": result.get("trace_summary", ""),
+        # ---- Debug metadata (trace file reference; trace itself is separate) ----
+        "_meta": {
+            "timestamp": now_iso,
+            "trace_file": None,
+        },
     }
+
+    # --- Separate trace: write to file if trace_dir given, else discard ---
+    trace_data = result.get("trace")
+    trace_summary = result.get("trace_summary", "")
+    if trace_dir and trace_data is not None:
+        trace_dir_path = Path(trace_dir)
+        trace_dir_path.mkdir(parents=True, exist_ok=True)
+        trace_file = trace_dir_path / f"{skill_path.name}_trace.json"
+        try:
+            trace_file.write_text(
+                json.dumps(trace_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            audit_result["_meta"]["trace_file"] = str(trace_file)
+        except OSError as e:
+            logger.warning(f"Cannot write trace file {trace_file}: {e}")
+    audit_result["_meta"]["trace_summary"] = trace_summary or None
+
+    return audit_result
