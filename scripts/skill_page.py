@@ -287,26 +287,41 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
             return Path(str(f)).name
 
     def _chain_html(it):
-        """恶意调用链：User → 构造输入 → 恶意块 → 外部关联代码(flow-item)。"""
+        """恶意调用链 DAG 图：User → 触发输入 → 恶意块 → flow-items。
+
+        借鉴 Cytoscape.js + Dagre 视觉：分层布局、节点卡片、贝塞尔曲线箭头。
+        手写原生 JS/CSS（renderGraph），自包含单文件 HTML。
+        """
         flow = it.get("flow") or {}
         ac = flow.get("attack_chain") or {}
         user_input = ac.get("user_input") or "（待 Phase 4 构造触发输入）"
         flow_items = ac.get("flow_items") or flow.get("code_evidence") or []
         bid = flow.get("block_id") or "?"
-        nodes = ['<div class="chain-node chain-user">User</div>',
-                 '<div class="chain-arrow">→</div>',
-                 f'<div class="chain-input">{html_escape(user_input)}</div>',
-                 '<div class="chain-arrow">→</div>',
-                 f'<div class="chain-node chain-block">恶意块 #{bid}</div>']
-        for fi in flow_items:
-            loc = f'{_rel_path(fi.get("file"))}:{fi.get("line_start","?")}'
-            cap = html_escape(fi.get("capability") or "")
-            code = html_escape(str(fi.get("code") or ""))
-            nodes += ['<div class="chain-arrow">→</div>',
-                      f'<div class="chain-node chain-code"><b>{cap}</b>'
-                      f'<span class="loc">{html_escape(loc)}</span>'
-                      f'<code>{code}</code></div>']
-        return f'<div class="attack-chain">{"".join(nodes)}</div>'
+        trig = flow.get("trigger_condition") or ""
+
+        nodes = [
+            {"id": "n0", "type": "user", "title": "User", "text": ""},
+            {"id": "n1", "type": "input", "title": "触发输入", "text": user_input},
+            {"id": "n2", "type": "block", "title": f"恶意块 #{bid}", "text": trig},
+        ]
+        edges = [["n0", "n1"], ["n1", "n2"]]
+        for i, fi in enumerate(flow_items):
+            nid = f"n{3 + i}"
+            nodes.append({
+                "id": nid,
+                "type": "code",
+                "title": fi.get("capability") or "",
+                "text": f'{_rel_path(fi.get("file"))}:{fi.get("line_start", "?")}',
+                "code": str(fi.get("code") or ""),
+            })
+            edges.append(["n2", nid])
+
+        gid = f"ag-{bid}"
+        return (
+            f'<div class="attack-graph" id="{gid}"><svg class="ag-edges"></svg></div>'
+            f'<script>renderGraph("{gid}", {json.dumps(nodes, ensure_ascii=False)}, '
+            f'{json.dumps(edges, ensure_ascii=False)})</' + 'script>'
+        )
 
     rows_html = []
     for i, it in enumerate(items):
@@ -391,17 +406,18 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   .caps-intended {{ flex: 1; font-size: 12px; color: #555; line-height: 1.6; }}
   /* modal 2x2 六色 badge */
   .cls-badge {{ display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; color: #333; border: 1px solid rgba(0,0,0,.12); }}
-  /* 恶意调用链：User → 构造输入 → 恶意块 → flow-item */
-  .attack-chain {{ display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px; margin: 6px 10px 12px 10px; padding: 8px 10px; background: #fff8f8; border: 1px solid #f0c8c8; border-radius: 8px; font-size: 12px; }}
-  .chain-node {{ padding: 4px 8px; border-radius: 6px; font-family: Consolas, "Courier New", monospace; max-width: 220px; overflow: hidden; }}
-  .chain-user {{ background: #333; color: #fff; font-weight: 700; flex-shrink: 0; }}
-  .chain-block {{ background: #ffe0d6; color: #c0392b; font-weight: 700; border: 1px solid #f0b4a4; flex-shrink: 0; }}
-  .chain-code {{ background: #f6f8fa; border: 1px solid #ddd; color: #333; }}
-  .chain-code b {{ display: block; font-size: 11px; margin-bottom: 2px; }}
-  .chain-code .loc {{ display: block; font-size: 11px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }}
-  .chain-code code {{ display: block; font-size: 11px; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }}
-  .chain-input {{ background: #fff3cd; border: 1px dashed #e0c060; padding: 4px 8px; border-radius: 6px; color: #7a5c00; max-width: 260px; font-size: 11px; line-height: 1.4; word-break: break-word; }}
-  .chain-arrow {{ color: #999; font-weight: 700; align-self: center; flex-shrink: 0; }}
+  /* 恶意调用链 DAG 图（Cytoscape.js + Dagre 风格，手写原生） */
+  .attack-graph {{ position: relative; margin: 8px 10px 12px 10px; background: #fbfbfd; border: 1px solid #e3e3ea; border-radius: 10px; overflow: hidden; }}
+  .ag-edges {{ position: absolute; inset: 0; pointer-events: none; }}
+  .ag-node {{ position: absolute; transform: translate(-50%, -50%); width: 170px; border-radius: 10px; padding: 6px 10px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,.08); border: 1px solid; box-sizing: border-box; }}
+  .ag-user {{ background: #2f3542; color: #fff; border-color: #2f3542; text-align: center; width: auto; padding: 8px 18px; font-weight: 700; border-radius: 20px; }}
+  .ag-input {{ background: #fff8e1; border-color: #f0d97a; color: #6d5a00; max-width: 250px; }}
+  .ag-block {{ background: #ffebe6; border-color: #f2b8a8; color: #c0392b; font-weight: 700; }}
+  .ag-code {{ background: #fff; border-color: #d8d8e0; }}
+  .ag-title {{ font-weight: 700; font-size: 11px; margin-bottom: 2px; }}
+  .ag-text {{ font-size: 11px; line-height: 1.4; word-break: break-word; max-height: 52px; overflow: hidden; }}
+  .ag-code .ag-text {{ font-family: Consolas, "Courier New", monospace; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .ag-code .ag-code-text {{ font-family: Consolas, "Courier New", monospace; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }}
   #close {{ float: right; cursor: pointer; border: none; background: none; font-size: 20px; color: #999; }}
 </style>
 </head>
@@ -435,6 +451,44 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
 </div>
 
 <script>
+  function escapeHtml(s) {{
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }}
+  // 恶意调用链 DAG 图（借鉴 Cytoscape.js + Dagre：分层布局 + 节点卡片 + 贝塞尔箭头，原生实现）
+  function renderGraph(gid, nodes, edges) {{
+    const el = document.getElementById(gid);
+    if (!el) return;
+    const COL_W = 220, H = 150;
+    const W = Math.max(300, nodes.length * COL_W + 40);
+    el.style.width = W + 'px';
+    el.style.height = H + 'px';
+    const svg = el.querySelector('.ag-edges');
+    svg.setAttribute('width', W);
+    svg.setAttribute('height', H);
+    const pos = {{}};
+    nodes.forEach((n, i) => {{ pos[n.id] = {{ x: 20 + i * COL_W, y: H / 2 }}; }});
+    let paths = '<defs><marker id="ag-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa0a6"/></marker></defs>';
+    edges.forEach(([a, b]) => {{
+      const pa = pos[a], pb = pos[b];
+      if (!pa || !pb) return;
+      const x1 = pa.x + 85, y1 = pa.y;
+      const x2 = pb.x - 85, y2 = pb.y;
+      const mx = (x1 + x2) / 2;
+      paths += '<path d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" fill="none" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#ag-arrow)"/>';
+    }});
+    svg.innerHTML = paths;
+    let nodeHtml = '';
+    nodes.forEach(n => {{
+      const p = pos[n.id];
+      if (!p) return;
+      nodeHtml += '<div class="ag-node ag-' + n.type + '" style="left:' + p.x + 'px;top:' + p.y + 'px">' +
+        '<div class="ag-title">' + escapeHtml(n.title || '') + '</div>' +
+        (n.text ? '<div class="ag-text">' + escapeHtml(n.text) + '</div>' : '') +
+        (n.code ? '<div class="ag-code-text">' + escapeHtml(n.code) + '</div>' : '') +
+        '</div>';
+    }});
+    el.insertAdjacentHTML('beforeend', nodeHtml);
+  }}
   const items = {json.dumps(items, ensure_ascii=False)};
   const modal = document.getElementById('modal');
   function show(it) {{
