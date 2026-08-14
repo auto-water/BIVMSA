@@ -501,6 +501,85 @@ const INTENT_NAMES = {
   G: '非对抗性', H: '模糊',
 };
 
+// --- Phase 4: malicious attack chain construction (per malicious block) ---
+log('Phase 4: constructing malicious attack chains...');
+let attackChains = [];
+const maliciousBlocks = (vdeclResult?.block_classifications || [])
+  .filter(b => b && b.classification && b.classification.includes('malicious'));
+if (maliciousBlocks.length > 0) {
+  // capability_code_evidence 不在 --evidence 紧凑输出里，需取完整确定性结果
+  const detFull = parseJsonOutput(await agent(
+    `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences:
+
+python scripts/biv_audit.py ${skillDir}
+
+The output is a single JSON object. Output ONLY that JSON object.`,
+    { label: 'det-full-phase4' }
+  ));
+  const cce = (detFull && detFull.phase1 && detFull.phase1.capability_code_evidence) || {};
+  const chainResults = await Promise.all(maliciousBlocks.map(async (mb, idx) => {
+    // 精简 vars：block.text 截短、code_evidence 只保留该块涉及的能力，
+    // 避免超长 heredoc 在 subagent 执行时损坏（曾导致 block 字段丢失）。
+    const capsOfBlock = mb.capabilities || [];
+    const cceFiltered = {};
+    for (const cap of capsOfBlock) {
+      if (cce[cap]) cceFiltered[cap] = cce[cap];
+    }
+    const chainVars = {
+      block: {
+        block_id: mb.block_id,
+        trigger_condition: mb.trigger_condition || '',
+        classification: mb.classification || '',
+        capabilities: capsOfBlock,
+        text: (mb.text || '').slice(0, 600),
+      },
+      code_evidence: cceFiltered,
+    };
+    const prompt = await agent(
+      `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py attack_chain --skill-dir ${skillDir} --variant single <<'VARS_JSON'
+${JSON.stringify(chainVars)}
+VARS_JSON
+
+Return ONLY the rendered prompt text.`,
+      { label: `render-chain-${idx}` }
+    );
+    const r = await agent(
+      prompt,
+      {
+        label: `attack_chain-${idx}`,
+        phase: 'Classify',
+        schema: {
+          type: 'object',
+          properties: {
+            block_id: { type: 'integer' },
+            user_input: { type: 'string' },
+            flow_items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  capability: { type: 'string' },
+                  file: { type: 'string' },
+                  line_start: { type: 'integer' },
+                  code: { type: 'string' },
+                },
+                required: ['capability', 'file', 'line_start', 'code'],
+              },
+            },
+          },
+          required: ['block_id', 'user_input', 'flow_items'],
+        },
+      }
+    );
+    if (r) log(`Phase 4 chain for block ${r.block_id}: ${(r.flow_items || []).length} flow-item(s)`);
+    return r;
+  }));
+  attackChains = chainResults.filter(Boolean);
+}
+log(`Phase 4: ${attackChains.length} attack chain(s)`);
+
 const finalResult = {
   skill_name: skillName,
   skill_dir: skillDir,
@@ -526,6 +605,8 @@ const finalResult = {
     no_deviation_malicious_count: vdeclNoDevMal,
     coverage: vdeclResult?.coverage || {},
   },
+  // Phase 4: 恶意调用链（每个恶意块 → 构造触发输入 + 恶意代码片段）
+  attack_chains: attackChains,
   // Phase 0: structured blocks (downstream annotation units)
   phase0: phase0,
   // Deterministic evidence passed through for traceability

@@ -42,6 +42,29 @@
             }
           }
         },
+        "attack_chains": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["block_id", "user_input", "flow_items"],
+            "properties": {
+              "block_id": { "type": "integer" },
+              "user_input": { "type": "string" },
+              "flow_items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "capability": { "type": "string" },
+                    "file": { "type": "string" },
+                    "line_start": { "type": "integer" },
+                    "code": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
         "vdecl": {
           "type": "object",
           "properties": {

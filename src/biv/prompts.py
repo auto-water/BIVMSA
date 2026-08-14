@@ -216,6 +216,75 @@ Rules:
 
 
 # =============================================================================
+# Phase 4 — malicious attack chain construction
+#
+# For each flagged malicious block, construct the attack chain:
+#   User --[constructed trigger input]--> malicious block --> flow-items
+#   (the actual malicious code snippets from external code evidence).
+# =============================================================================
+
+
+def render_attack_chain(
+    skill_name: str,
+    block: Dict[str, Any],
+    code_evidence: Dict[str, Any],
+) -> str:
+    """Phase 4 prompt: build a malicious attack chain for ONE malicious block.
+
+    Args:
+        skill_name: skill name
+        block: the malicious block classification row
+               ({block_id, trigger_condition, classification, text, capabilities})
+        code_evidence: capability_code_evidence map (capability -> locations[])
+    """
+    caps = block.get("capabilities") or []
+
+    def _fmt_code(cap: str) -> str:
+        locs = (code_evidence.get(cap) or {}).get("locations", [])
+        if not locs:
+            return f"- {cap}: (no code location)"
+        return "\n".join(
+            f"- {cap} | {l.get('file', '?')}:{l.get('line_start', '?')} | {l.get('code', '')}"
+            for l in locs[:6]
+        )
+
+    code_txt = "\n".join(_fmt_code(cap) for cap in caps) or "(none)"
+    block_text = (block.get("text") or "")[:2000]
+
+    return f"""You are constructing a malicious ATTACK CHAIN for a flagged malicious block of an AI agent skill.
+
+## Skill: {skill_name}
+
+## Malicious Block
+- block_id: {block.get("block_id")}
+- trigger_condition: {block.get("trigger_condition") or "(none)"}
+- classification: {block.get("classification")}
+- block text:
+{block_text}
+
+## External code evidence for this block's capabilities
+{code_txt}
+
+## Task
+1. Construct a REALISTIC USER INPUT that would trigger this block's execution — a plausible user request/prompt matching the block's trigger condition (this is what the user would say/ask to make the skill execute this malicious path).
+2. Identify the ACTUAL malicious code snippet(s) from the external code evidence above that execute when the block is triggered (the lines implementing the harmful operation). Use the quoted file/line/code.
+
+Return ONLY a JSON object:
+{{
+  "block_id": {block.get("block_id")},
+  "user_input": "1-2 sentence realistic user prompt/request that triggers this block",
+  "flow_items": [
+    {{"capability": "taxonomy_code", "file": "path", "line_start": N, "code": "the malicious code line"}}
+  ]
+}}
+
+Rules:
+- user_input must match the trigger_condition (the scenario where this block runs).
+- flow_items must come from the external code evidence (the malicious snippets), not invented code.
+- Include ONLY code snippets that implement the harmful behavior."""
+
+
+# =============================================================================
 # LLM classifier — root cause classification
 # =============================================================================
 
@@ -591,6 +660,12 @@ def _render_one(name: str, vars: Dict[str, Any], variant: str) -> str:
             vars.get("skill_name", ""), blocks,
             vars.get("D", []), vars.get("A", []),
             vars.get("U", []), vars.get("O", []),
+        )
+    if name == "attack_chain":
+        return render_attack_chain(
+            vars.get("skill_name", ""),
+            vars.get("block", {}) or {},
+            vars.get("code_evidence", {}) or {},
         )
     raise ValueError(f"unknown template: {name}")
 
