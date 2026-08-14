@@ -343,7 +343,7 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
             )
         if kind == "frontmatter":
             cls_style = UNCLS
-            extra = "frontmatter-row"
+            extra = "line frontmatter-row"  # 复用 .line 正文格式（字体/间距），仅不填色
         else:
             cls_style = CLS.get(it["cls"], {}).get("bg", UNCLS)
             extra = f"line {it['cls']}"
@@ -376,7 +376,7 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   #skill {{ margin: 0; padding: 20px 24px; }}
   .line {{ padding: 4px 10px; margin: 1px 0; border-radius: 4px; white-space: pre-wrap;
            font-family: Consolas, "Courier New", monospace; font-size: 14px; line-height: 1.5; }}
-  .frontmatter-row {{ color: #999; font-size: 12px; }}
+  .frontmatter-row {{ color: #999; }}
   .trigger-head {{ margin: 14px 10px 2px 10px; padding: 3px 10px; border-left: 4px solid #8a8a8a; background: #f2f2f2; border-radius: 3px; font-size: 12px; color: #555; font-weight: 600; }}
   .trigger-head .th-icon {{ margin-right: 4px; }}
   .trigger-head .th-id {{ color: #aaa; font-weight: 400; font-size: 11px; margin-left: 6px; }}
