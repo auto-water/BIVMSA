@@ -192,6 +192,14 @@ def load_real_annotations(result_file: Path) -> dict:
     a_caps = sorted(set((p1.get("A_ast") or []) + (p1.get("A_regex") or []) + (d.get("a_llm_instr_caps") or [])))
     intended = d.get("intended_workflow") or ""
 
+    # Phase 4: 恶意调用链（每个恶意块 → 构造的用户输入 + 外部关联代码），可选
+    attack_chains = d.get("attack_chains") or []
+    attack_by_id = {
+        ac.get("block_id"): ac
+        for ac in attack_chains
+        if ac and ac.get("block_id") is not None
+    }
+
     blocks = (d.get("phase0", {}) or {}).get("blocks") or []
 
     sentences = []
@@ -221,6 +229,7 @@ def load_real_annotations(result_file: Path) -> dict:
                     item["flow"]["block_id"] = bid
                 item["flow"]["block_kind"] = b.get("kind", "")
                 item["flow"]["trigger_condition"] = b.get("trigger_condition", "")
+                item["flow"]["attack_chain"] = attack_by_id.get(bid)
                 sentences.append(item)
         mode = "真实标注（按块）" if classifications else "待分类（无块级标注）"
     else:
@@ -266,6 +275,27 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
         '</div>'
     )
 
+    def _chain_html(it):
+        """恶意调用链：User → 构造输入 → 恶意块 → 外部关联代码(flow-item)。"""
+        flow = it.get("flow") or {}
+        ac = flow.get("attack_chain") or {}
+        user_input = ac.get("user_input") or "（待 Phase 4 构造触发输入）"
+        flow_items = ac.get("flow_items") or flow.get("code_evidence") or []
+        bid = flow.get("block_id") or "?"
+        nodes = ['<div class="chain-node chain-user">User</div>',
+                 '<div class="chain-arrow">→</div>',
+                 f'<div class="chain-input" title="可能触发该块调用的用户输入">{html_escape(user_input)}</div>',
+                 '<div class="chain-arrow">→</div>',
+                 f'<div class="chain-node chain-block">恶意块 #{bid}</div>']
+        for fi in flow_items:
+            code = html_escape(str((fi.get("code") or "")[:80]))
+            loc = f'{fi.get("file","?")}:{fi.get("line_start","?")}'
+            cap = html_escape(fi.get("capability") or "")
+            nodes += ['<div class="chain-arrow">→</div>',
+                      f'<div class="chain-node chain-code"><b>{cap}</b> · {html_escape(loc)}'
+                      f'<br><code>{code}</code></div>']
+        return f'<div class="attack-chain">{"".join(nodes)}</div>'
+
     rows_html = []
     for i, it in enumerate(items):
         kind = it["kind"]
@@ -291,6 +321,9 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
             f'<div class="{extra}" data-idx="{i}" '
             f'style="background:{cls_style};{bold}">{html_escape(it["text"])}</div>'
         )
+        # 恶意块下方渲染恶意调用链（Phase 4 数据；无则 flow_items 从 code_evidence fallback）
+        if "malicious" in it["cls"]:
+            rows_html.append(_chain_html(it))
 
     legend = "".join(
         f'<span class="lg" style="background:{v["bg"]}">{v["label"]}</span>'
@@ -346,6 +379,15 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   .caps-intended {{ flex: 1; font-size: 12px; color: #555; line-height: 1.6; }}
   /* modal 2x2 六色 badge */
   .cls-badge {{ display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; color: #333; border: 1px solid rgba(0,0,0,.12); }}
+  /* 恶意调用链：User → 构造输入 → 恶意块 → flow-item */
+  .attack-chain {{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 6px 10px 12px 10px; padding: 8px 10px; background: #fff8f8; border: 1px solid #f0c8c8; border-radius: 8px; font-size: 12px; }}
+  .chain-node {{ padding: 4px 10px; border-radius: 6px; font-family: Consolas, "Courier New", monospace; }}
+  .chain-user {{ background: #333; color: #fff; font-weight: 700; }}
+  .chain-block {{ background: #ffe0d6; color: #c0392b; font-weight: 700; border: 1px solid #f0b4a4; }}
+  .chain-code {{ background: #f6f8fa; border: 1px solid #ddd; color: #333; }}
+  .chain-code code {{ font-size: 11px; color: #555; }}
+  .chain-input {{ background: #fff3cd; border: 1px dashed #e0c060; padding: 4px 8px; border-radius: 6px; color: #7a5c00; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .chain-arrow {{ color: #999; font-weight: 700; }}
   #close {{ float: right; cursor: pointer; border: none; background: none; font-size: 20px; color: #999; }}
 </style>
 </head>
