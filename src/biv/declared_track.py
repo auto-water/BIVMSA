@@ -15,7 +15,6 @@ from typing import Dict, List, Optional, Set, Tuple
 from .taxonomy import (
     ALL_CAPABILITY_CODES,
     CAPABILITIES,
-    CAPABILITIES_BY_CATEGORY,
     TOOL_CAPABILITY_MAP,
     CapabilityDef,
 )
@@ -164,56 +163,6 @@ def extract_declared_deterministic(
 # The actual LLM call is orchestrated by the Workflow script.
 # This module provides the prompt template and output processing.
 
-
-def build_declared_llm_prompt(skill_body: str, skill_name: str) -> str:
-    """Build the structured prompt for LLM semantic capability extraction.
-
-    This produces the prompt that the Workflow script sends to the Agent tool
-    with schema-based structured output.
-    """
-    # Build taxonomy reference
-    taxonomy_lines = []
-    for cat_key, cat_data in sorted(CAPABILITIES_BY_CATEGORY.items()):
-        cat_info = CAPABILITIES[cat_data[0]]
-        cat_name = {"network": "网络", "filesystem": "文件系统", "process": "进程执行",
-                      "environment": "环境变量", "encoding": "编码/转换",
-                      "credential": "凭证", "instruction": "指令级"}.get(cat_key, cat_key)
-        taxonomy_lines.append(f"\n### {cat_name} (risk: {cat_info.risk.value})")
-        for cap_code in cat_data:
-            cap = CAPABILITIES[cap_code]
-            taxonomy_lines.append(f"  - `{cap_code}`: {cap.description}")
-
-    taxonomy_text = "\n".join(taxonomy_lines)
-
-    prompt = f"""You are a behavioral capability auditor. Analyze the following agent skill description and extract ALL capabilities it DECLARES (claims to have).
-
-## Taxonomy
-The following capabilities exist in our taxonomy:
-{taxonomy_text}
-
-## Skill: {skill_name}
-
-{skill_body}
-
-## Instructions
-
-1. Read the skill description carefully.
-2. Extract ALL capabilities that the skill DECLARES (claims to perform or have access to).
-3. For each declared capability, provide a QUOTED PASSAGE from the skill text as evidence.
-4. Also describe the intended workflow and expected data lineages (this helps anchor your analysis but does not become part of the output).
-
-## Output Format
-
-Return a structured JSON object with:
-- `declared_capabilities`: array of objects, each containing:
-  - `capability`: the taxonomy code (e.g., "fs-read-project")
-  - `evidence`: the EXACT quoted sentence/paragraph from the skill that supports this capability
-  - `evidence_location`: approximate location ("frontmatter" or "body")
-- `intended_workflow`: a 1-3 sentence description of what the skill intends to do (CoT anchor)
-- `expected_data_lineages`: a 1-3 sentence description of expected data flows (CoT anchor)
-
-IMPORTANT: Only claim a capability if there is clear textual evidence. Do NOT echo taxonomy categories verbatim — analyze the actual skill content."""
-    return prompt
 
 
 def validate_llm_output(

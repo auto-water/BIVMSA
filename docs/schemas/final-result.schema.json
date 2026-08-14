@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://biv.local/schemas/final-result.schema.json",
+  "title": "BIV Final Audit Result",
+  "description": "Output of assemble_final_output() — the complete audit result after LLM extraction / classifier / judge merge. Used by the full LLM pipeline. Fields only grow; additional keys allowed.",
+  "type": "object",
+  "required": [
+    "skill_name", "skill_dir", "verdict", "confidence", "verdict_source",
+    "classification", "capability_counts", "capabilities", "root_cause", "_meta"
+  ],
+  "properties": {
+    "skill_name": { "type": "string" },
+    "skill_dir": { "type": "string" },
+    "verdict": { "enum": ["benign", "malware"] },
+    "confidence": { "type": "number" },
+    "verdict_source": { "type": "string" },
+    "verdict_reasoning": { "type": "string" },
+    "classification": {
+      "type": "object",
+      "required": ["deviation_axis", "malicious_axis", "quadrant"],
+      "properties": {
+        "deviation_axis": { "enum": ["deviated", "none"] },
+        "malicious_axis": { "enum": ["malicious", "benign"] },
+        "quadrant": { "enum": ["deviated-malicious", "deviated-benign", "no-deviation-malicious", "no-deviation-benign"] }
+      }
+    },
+    "capability_counts": {
+      "type": "object",
+      "required": ["declared", "actual", "undeclared", "overdeclared"],
+      "properties": {
+        "declared": { "type": "integer" },
+        "actual": { "type": "integer" },
+        "undeclared": { "type": "integer" },
+        "overdeclared": { "type": "integer" }
+      }
+    },
+    "structure": { "type": "object" },
+    "frontmatter": { "type": "object" },
+    "taxonomy": { "type": "object" },
+    "capabilities": {
+      "type": "object",
+      "required": ["declared", "actual", "undeclared", "overdeclared"],
+      "properties": {
+        "declared": { "type": "array", "items": { "type": "string" } },
+        "actual": { "type": "array", "items": { "type": "string" } },
+        "undeclared": { "type": "array", "items": { "type": "string" } },
+        "overdeclared": { "type": "array", "items": { "type": "string" } },
+        "declared_sources": { "type": "array" },
+        "actual_sources": { "type": "array" }
+      }
+    },
+    "flows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string" },
+          "source_location": { "type": "string" },
+          "transforms": { "type": "array" },
+          "sink": { "type": "string" },
+          "sink_location": { "type": "string" }
+        }
+      }
+    },
+    "compound_flags": { "type": "object" },
+    "root_cause": {
+      "type": "object",
+      "properties": {
+        "classification": { "type": "string" },
+        "intent_category": { "type": "string" },
+        "intent_category_name": { "type": "string" },
+        "intent_leaf": { "type": "string" },
+        "intent_leaf_description": { "type": "string" },
+        "kill_chain": { "type": ["string", "null"] },
+        "rule_engine_match": { "type": ["string", "null"] },
+        "classifier_source": { "type": "string" }
+      }
+    },
+    "findings": { "type": "array" },
+    "finding_counts": {
+      "type": "object",
+      "properties": {
+        "critical": { "type": "integer" },
+        "high": { "type": "integer" },
+        "medium": { "type": "integer" },
+        "total": { "type": "integer" }
+      }
+    },
+    "urls": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "integer" },
+        "trusted_count": { "type": "integer" },
+        "untrusted_count": { "type": "integer" },
+        "untrusted": { "type": "array" }
+      }
+    },
+    "relaxed_veto": {
+      "type": "object",
+      "properties": {
+        "fired": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "compound_flag": { "type": ["string", "null"] }
+      }
+    },
+    "_meta": {
+      "type": "object",
+      "required": ["timestamp", "pipeline_version"],
+      "properties": {
+        "d_llm_rejected": { "type": "array", "items": { "type": "string" } },
+        "a_llm_instr_rejected": { "type": "array", "items": { "type": "string" } },
+        "timestamp": { "type": "string" },
+        "audit_time": { "type": "string" },
+        "pipeline_version": { "type": "string" },
+        "trace_ref": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

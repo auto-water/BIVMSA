@@ -13,13 +13,11 @@ from typing import Dict, List, Optional, Set, Tuple
 from .taxonomy import (
     RULES,
     KILL_CHAINS,
-    INTENT_TAXONOMY,
     INTENT_LEAF_DESCRIPTIONS,
     INTENT_CATEGORY_NAMES,
     ADVERSARIAL_BRANCHES,
     NON_ADVERSARIAL_BRANCHES,
     AMBIGUOUS_BRANCHES,
-    CAPABILITIES,
     CAPABILITY_RISK,
     RuleDef,
     RiskTier,
@@ -182,107 +180,6 @@ def apply_rule_engine(
 # =============================================================================
 
 
-def build_classifier_prompt(
-    U: Set[str],
-    O: Set[str],
-    A: Set[str],
-    D: Set[str],
-    flows: List[Dict],
-    compound_flags: Dict[str, bool],
-    skill_name: str,
-) -> str:
-    """Build the structured prompt for the LLM root cause classifier.
-
-    This handles the ~1/3 of deviations that don't match any deterministic rule.
-    The LLM reasons jointly over the skill's full deviation list and matches
-    against 10 predefined kill-chain patterns.
-    """
-    # Format capabilities for readability
-    def _cap_names(cap_set: Set[str]) -> str:
-        if not cap_set:
-            return "(none)"
-        items = []
-        for c in sorted(cap_set):
-            cap = CAPABILITIES.get(c)
-            name = cap.name if cap else c
-            items.append(f"  - `{c}`: {name}")
-        return "\n".join(items)
-
-    # Format flows
-    flow_lines = []
-    for i, flow in enumerate(flows[:10]):  # Limit to 10 flows
-        flow_lines.append(
-            f"  {i+1}. {flow.get('source','?')} → {flow.get('sink','?')}"
-        )
-
-    # Format compound flags
-    triggered = [k for k, v in compound_flags.items() if v]
-    flag_lines = "\n".join(f"  - {f}: TRIGGERED" for f in triggered) if triggered else "  (none)"
-
-    # Kill chain patterns for reference
-    kc_lines = "\n".join(
-        f"  - `{name}`: {desc}" for name, desc in KILL_CHAINS.items()
-    )
-
-    # Intent taxonomy reference (abbreviated)
-    intent_lines = []
-    for branch in sorted(INTENT_TAXONOMY.keys()):
-        data = INTENT_TAXONOMY[branch]
-        intent_lines.append(f"**{branch} — {data['name']}**")
-        for leaf, desc in sorted(data.items()):
-            if leaf != "name":
-                intent_lines.append(f"  - {leaf}: {desc}")
-
-    prompt = f"""You are a root-cause classifier for AI agent skill behavioral deviations.
-
-## Skill: {skill_name}
-
-## Deviation Evidence
-
-### Undeclared Capabilities U(s) — present in code but NOT in documentation:
-{_cap_names(U)}
-
-### Overdeclared Capabilities O(s) — claimed in documentation but NOT in code:
-{_cap_names(O)}
-
-### All Actual Capabilities A(s):
-{_cap_names(A)}
-
-### Data Flow Chains:
-{chr(10).join(flow_lines) if flow_lines else '  (none detected)'}
-
-### Compound Threat Flags:
-{flag_lines}
-
-## Your Task
-
-1. Reason JOINTLY over the full deviation list — multi-deviation kill chains must be detected as units, not individual deviations.
-2. Match against these 10 predefined kill-chain patterns:
-{kc_lines}
-3. Classify the root cause into one of these 36 intent leaves:
-
-{chr(10).join(intent_lines)}
-
-## Output Format
-
-Return a structured JSON object:
-- `intent_leaf`: the 36-leaf code (e.g., "C1", "F1", "G7", "H2")
-- `intent_category`: the branch code (A-H)
-- `classification`: "adversarial" | "non_adversarial" | "ambiguous"
-- `kill_chain`: matching kill-chain pattern name, or null if none matches
-- `reasoning`: 2-4 sentences explaining why this classification was chosen
-- `confidence`: 0.0-1.0 indicating confidence in this classification
-
-IMPORTANT:
-- Non-adversarial branch is G (over-engineering, documentation error, telemetry, etc.)
-- Adversarial branches are A-F
-- Use H1/H2 only when truly ambiguous
-- G1 vs G7 distinction: low-risk over-specification → G1 (over-engineering),
-  higher-risk mismatch → G7 (documentation error)
-- Joint reasoning matters: a single undeclared capability may be benign,
-  but a pattern of multiple coordinated undeclared capabilities is suspicious."""
-
-    return prompt
 
 
 def validate_classifier_output(llm_output: Dict) -> Tuple[Optional[str], Optional[str], str, Optional[str], float]:

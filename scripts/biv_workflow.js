@@ -62,8 +62,14 @@ if (detEvidence) {
 function parseJsonOutput(raw) {
   if (!raw || typeof raw !== 'string') return null;
   let text = raw.trim();
-  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch) text = fenceMatch[1].trim();
+  // Strip a markdown code fence ONLY when the whole output is fenced (starts
+  // with ```). Never strip fences at arbitrary positions: JSON string VALUES
+  // can legitimately contain ``` sequences (e.g. SKILL.md embeds ```bash
+  // blocks), and a blind .match() would corrupt the JSON before parsing.
+  if (text.startsWith('```')) {
+    const fenceMatch = text.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/);
+    if (fenceMatch) text = fenceMatch[1].trim();
+  }
   try {
     return JSON.parse(text);
   } catch (e) {
@@ -134,39 +140,21 @@ const bodyContent = (parsedSkill && parsedSkill.body) || '';
 // Step 1b: Parallel LLM extraction
 log('Running LLM capability extraction (declared track + instruction analysis)...');
 
-const taxonomyRef = `
-Network (High risk): net-http-out, net-socket-out, net-inbound, net-download-exec
-Filesystem (Medium risk): fs-read-project, fs-read-sensitive, fs-read-home, fs-write, fs-write-sensitive, fs-enumerate, fs-delete
-Process Execution (High risk): proc-exec, proc-exec-shell, proc-code-eval, proc-code-eval-dynamic
-Environment (High risk): env-access-specific, env-access-bulk, env-access-sensitive
-Encoding (Medium risk): enc-base64, enc-crypto, enc-compression
-Credential (Critical risk): cred-read, cred-create, cred-transmit
-Instruction-Level (Critical risk): instr-override, instr-conceal, instr-identity-hijack, instr-silent-exec, instr-exfil-instruction
-`;
+// Render LLM prompts from the single Python authority (src/biv/prompts.py).
+const llmPrompts = parseJsonOutput(await agent(
+  `Run this shell command and return its EXACT raw stdout JSON (a map of template name -> rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py --multi d_llm_extract,a_llm_instr --skill-dir ${skillDir} --variant single
+
+The output is a single JSON object. Output ONLY that JSON object.`,
+  { label: 'render-llm-prompts' }
+));
+const dLlmPrompt = (llmPrompts && llmPrompts.d_llm_extract) || '';
+const aLlmInstrPrompt = (llmPrompts && llmPrompts.a_llm_instr) || '';
 
 // D_llm: Extract declared capabilities from natural language
 const dLlmResult = await agent(
-  `You are a behavioral capability auditor. Analyze the following agent skill description and extract ALL capabilities it DECLARES (claims to have).
-
-## Taxonomy Reference
-${taxonomyRef}
-
-## Skill: ${skillName}
-
-${bodyContent}
-
-## Instructions
-1. Read the skill description carefully.
-2. Extract ALL capabilities that the skill DECLARES (claims to perform or have access to).
-3. For each declared capability, provide a QUOTED PASSAGE from the skill text as evidence.
-4. Also describe the intended workflow and expected data lineages (this helps anchor your analysis).
-
-Return a JSON object with:
-- declared_capabilities: array of {capability: taxonomy_code, evidence: quoted_passage, evidence_location: "frontmatter" or "body"}[]
-- intended_workflow: 1-3 sentence description of what the skill intends to do (CoT anchor, not used downstream)
-- expected_data_lineages: 1-3 sentence description of expected data flows (CoT anchor, not used downstream)
-
-IMPORTANT: Only claim a capability if there is clear textual evidence. Do NOT echo taxonomy categories verbatim - analyze the actual skill content.`,
+  dLlmPrompt,
   {
     label: 'd_llm_extract',
     phase: 'Extract',
@@ -195,30 +183,7 @@ IMPORTANT: Only claim a capability if there is clear textual evidence. Do NOT ec
 
 // A_llm_instr: Extract instruction-level capabilities
 const aLlmInstrResult = await agent(
-  `You are a security auditor specializing in detecting hidden instructions and social-engineering patterns in AI agent skills.
-
-## Target Instruction-Level Capabilities
-- instr-override: text that tells the LLM to ignore, disregard, or override previous instructions
-- instr-conceal: hidden text using encoding, obfuscation, comments, metadata, or invisible characters
-- instr-identity-hijack: text that attempts to reassign the agent's role or persona
-- instr-silent-exec: mechanisms for background/automatic code execution (hooks, daemon threads, background processes, test file auto-discovery, lifecycle scripts)
-- instr-exfil-instruction: patterns attempting to extract or reveal the agent's system prompt
-
-## Skill: ${skillName}
-
-${bodyContent}
-
-## Instructions
-1. Look for patterns of instruction override, concealment, identity hijacking, silent execution, and instruction exfiltration.
-2. For each detected capability, provide a QUOTED PASSAGE as evidence.
-3. Distinguish legitimate instructional text from adversarial patterns.
-4. Mark each finding as is_adversarial: true/false.
-
-Return a JSON object with:
-- instruction_capabilities: array of {capability, evidence, evidence_location, is_adversarial}
-- analysis_summary: 2-3 sentence risk profile (CoT anchor)
-
-IMPORTANT: Only claim a capability if there is clear textual evidence. A skill saying "when the user says X, do Y" is NOT instruction hijacking.`,
+  aLlmInstrPrompt,
   {
     label: 'a_llm_instr_analysis',
     phase: 'Extract',
@@ -260,7 +225,196 @@ log('Deviation detection computed by Python pipeline (see Deterministic Analysis
 // ---------------------------------------------------------------------------
 phase('Classify');
 
-// Build the evidence summary for the LLM Judge (deterministic Φ(s) + LLM extraction)
+// ---------------------------------------------------------------------------
+// Phase 0: block chunking (semantic annotation units)
+// ---------------------------------------------------------------------------
+log('Phase 0: chunking SKILL.md into trigger-condition blocks...');
+const phase0 = await (async () => {
+  try {
+    const seedRaw = await agent(
+      `Run this shell command and return its EXACT raw stdout (a JSON object {unit,frontmatter_block,body_offset,body_lines,body_text,blocks}), with NO commentary, NO markdown code fences:
+
+python scripts/skill_chunk.py ${skillDir}
+
+The output is a single JSON object. Output ONLY that JSON object.`,
+      { label: 'chunk-seed' }
+    );
+    const seed = parseJsonOutput(seedRaw);
+    if (!seed || !Array.isArray(seed.body_lines)) {
+      log('Phase 0 seed invalid');
+      return { unit: 'trigger-block', count: 0, blocks: [] };
+    }
+    const fmBlock = seed.frontmatter_block || null;
+    const bodyLines = seed.body_lines;
+    const bodyOffset = seed.body_offset || 0;
+    const bodyTotal = bodyOffset + bodyLines.length;
+    const blocks = fmBlock ? [fmBlock] : [];
+
+    let start = bodyOffset + 1;
+    let iter = 0;
+    const MAX_ITER = 60;
+    while (start <= bodyTotal && iter < MAX_ITER) {
+      const startIdx = start - bodyOffset - 1;
+      const remaining = bodyLines.slice(startIdx).join('\n');
+      const r = parseJsonOutput(await agent(
+        `You divide a SKILL.md body into "trigger-condition blocks": each block is the MAX line range that would be executed under ONE trigger condition (e.g. one section / scenario / instruction set).
+
+## SKILL.md body (uncovered range starting at global line ${start}; body offset ${bodyOffset}; last global line ${bodyTotal})
+${remaining}
+
+## Task
+From global line ${start}, cut out the FIRST trigger-condition block (the max consecutive line range belonging to one trigger condition).
+Return ONLY a JSON object:
+{"line_start": ${start}, "line_end": <global line, >= line_start, <= ${bodyTotal}>, "trigger_condition": "<short condition, e.g. install CLI | sign-in | read secrets>"}`,
+        { label: `chunk-part-${iter}` }
+      ));
+      const effStart = (r && typeof r.line_start === 'number') ? r.line_start : start;
+      const le = (r && typeof r.line_end === 'number') ? r.line_end : start;
+      const effEnd = Math.max(effStart, le, start);
+      const li = Math.max(0, effStart - bodyOffset - 1);
+      const ri = Math.min(effEnd, bodyTotal) - bodyOffset - 1;
+      const lines = bodyLines.slice(li, Math.max(0, ri) + 1);
+      blocks.push({
+        block_id: blocks.length + 1,
+        kind: 'trigger',
+        line_start: Math.max(1, effStart),
+        line_end: Math.min(bodyTotal, effEnd),
+        trigger_condition: (r && r.trigger_condition) || '',
+        text: lines.join('\n'),
+        sentences: lines,
+      });
+      start = Math.min(bodyTotal, effEnd) + 1;
+      iter += 1;
+    }
+    return { unit: 'trigger-block', count: blocks.length, blocks };
+  } catch (e) {
+    log(`Phase 0 chunking failed: ${e}`);
+    return { unit: 'trigger-block', count: 0, blocks: [] };
+  }
+})();
+const blocks = phase0.blocks || [];
+log(`Phase 0 blocks: ${blocks.length}`);
+
+// ---------------------------------------------------------------------------
+// V_decl: block-level malicious classification (no-deviation-malicious)
+// ---------------------------------------------------------------------------
+log('Running V_decl block-level classification...');
+
+// Render sentence_classifier prompt (blocks from Phase 0; D/A/U/O via stdin)
+const vdeclVars = {
+  D: detEvidence?.D_det || [],
+  A: Array.from(new Set([...(detEvidence?.A_ast || []), ...(detEvidence?.A_regex || [])])),
+  U: detEvidence?.undeclared || [],
+  O: detEvidence?.overdeclared || [],
+};
+
+const VDECL_SCHEMA = {
+  type: 'object',
+  properties: {
+    block_classifications: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          block_id: { type: 'integer' },
+          text: { type: 'string' },
+          kind: { type: 'string', enum: ['action_instruction', 'non_action'] },
+          deviation_label: { type: 'string', enum: ['deviated', 'no_deviation'] },
+          malicious_label: { type: 'string', enum: ['malicious', 'benign'] },
+          classification: { type: 'string', enum: ['no-deviation-malicious', 'no-deviation-benign', 'deviated-malicious', 'deviated-benign'] },
+          capabilities: { type: 'array', items: { type: 'string' } },
+          core_instruction: { type: 'string' },
+          reason: { type: 'string' },
+        },
+        required: ['block_id', 'text', 'kind', 'deviation_label', 'malicious_label', 'classification', 'capabilities', 'core_instruction', 'reason'],
+      },
+    },
+    unconditional_harmful: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string' },
+          anchor: { type: 'string' },
+          block_id: { type: 'integer' },
+          evidence: { type: 'string' },
+        },
+        required: ['pattern', 'anchor', 'block_id', 'evidence'],
+      },
+    },
+    coverage: {
+      type: 'object',
+      properties: {
+        total_blocks: { type: 'integer' },
+        classified_blocks: { type: 'integer' },
+      },
+      required: ['total_blocks', 'classified_blocks'],
+    },
+  },
+  required: ['block_classifications', 'unconditional_harmful', 'coverage'],
+};
+
+// Long skills are classified in chunks by BLOCK count; blocks carry real global
+// block_id so each chunk needs no offset — results merge by block_id.
+const VDECL_CHUNK = 120;
+const chunks = [];
+for (let i = 0; i < blocks.length; i += VDECL_CHUNK) {
+  chunks.push(blocks.slice(i, i + VDECL_CHUNK));
+}
+
+const renderVdeclPrompt = (blockSubset, idx) => {
+  const vars = { ...vdeclVars, blocks: blockSubset };
+  return agent(
+    `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py sentence_classifier --skill-dir ${skillDir} --variant single <<'VARS_JSON'
+${JSON.stringify(vars)}
+VARS_JSON`,
+    { label: `render-vdecl-prompt${chunks.length > 1 ? '-' + idx : ''}` }
+  );
+};
+
+let vdeclResult = null;
+if (chunks.length <= 1) {
+  const vdeclPrompt = await renderVdeclPrompt(blocks, 0);
+  vdeclResult = await agent(
+    vdeclPrompt,
+    { label: 'vdecl_block_classifier', phase: 'Classify', schema: VDECL_SCHEMA }
+  );
+} else {
+  // Multi-chunk: one agent per block subset, merge by block_id (dedup).
+  const chunkResults = await Promise.all(chunks.map(async (chunk, idx) => {
+    const prompt = await renderVdeclPrompt(chunk, idx);
+    const r = await agent(
+      prompt,
+      { label: `vdecl_block_classifier-${idx}`, phase: 'Classify', schema: VDECL_SCHEMA }
+    );
+    log(`V_decl chunk ${idx + 1}/${chunks.length}: ${r ? (r.block_classifications || []).length : 0} blocks`);
+    return r;
+  }));
+  const merged = chunkResults.filter(Boolean);
+  const byId = {};
+  for (const r of merged) {
+    for (const c of (r.block_classifications || [])) {
+      if (c && typeof c.block_id === 'number') byId[c.block_id] = c;
+    }
+  }
+  const sortedCls = Object.keys(byId).map(Number).sort((a, b) => a - b).map(k => byId[k]);
+  const uncond = merged.flatMap(r => r.unconditional_harmful || []).filter(h => h && h.pattern);
+  vdeclResult = {
+    block_classifications: sortedCls,
+    unconditional_harmful: uncond,
+    coverage: { total_blocks: blocks.length, classified_blocks: sortedCls.length },
+  };
+}
+
+const vdeclHits = (vdeclResult?.unconditional_harmful || []).filter(h => h && h.pattern);
+const vdeclFired = vdeclHits.length > 0;
+const vdeclNoDevMal = (vdeclResult?.block_classifications || [])
+  .filter(s => s && s.classification === 'no-deviation-malicious').length;
+log(`V_decl: ${vdeclHits.length} unconditional-harmful hit(s), ${vdeclNoDevMal} no-deviation-malicious block(s), coverage=${vdeclResult?.coverage?.classified_blocks || 0}/${vdeclResult?.coverage?.total_blocks || 0}`);
+
+// Build the evidence summary for the LLM Judge (deterministic Φ(s) + LLM extraction + V_decl)
 const evidenceSummary = `
 ## Deterministic Analysis Φ(s) (from Python pipeline)
 ${buildDetEvidenceText(detEvidence)}
@@ -273,50 +427,29 @@ ${(aLlmInstrResult?.instruction_capabilities || []).map(c => `- ${c.capability} 
 
 ## Analysis Summary
 ${aLlmInstrResult?.analysis_summary || 'No instruction-level threats detected.'}
+
+## V_decl 声明轨道恶意通道（块级分类 — 无偏差恶意识别）
+${vdeclHits.length
+    ? vdeclHits.map(h => `- [!] ${h.pattern}: "${h.evidence}" (block ${h.block_id}, anchor: ${h.anchor})`).join('\n')
+    : 'no unconditional-harmful declaration detected'}
+no-deviation-malicious 块数: ${vdeclNoDevMal}
 `;
 
 // LLM Judge: Final verdict
 log('Running LLM Judge for final verdict...');
 
+// Render judge prompt (skill content read from skill-dir; evidence summary via stdin)
+const judgePrompt = await agent(
+  `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py judge --skill-dir ${skillDir} --variant single <<'VARS_JSON'
+${JSON.stringify({ evidence_summary: evidenceSummary })}
+VARS_JSON`,
+  { label: 'render-judge-prompt' }
+);
+
 const judgeResult = await agent(
-  `You are a senior security auditor making the FINAL binary classification for an AI agent skill.
-
-## Defining Malware
-A skill is MALWARE iff it violates user intent AND is likely to cause negative impact.
-- The skill performs actions NOT disclosed in its description
-- Those undisclosed actions pose security, privacy, or integrity risks
-- The deviation pattern suggests adversarial intent, not developer oversight
-
-## Skill: ${skillName}
-
-## Full Skill Content
-\`\`\`
-${skillContent.substring(0, 8000)}
-\`\`\`
-
-## Capability Extraction Results
-${evidenceSummary}
-
-## Instructions
-1. Reason step by step about:
-   a) Whether the skill's actual behavior matches its declared purpose
-   b) Whether any hidden capabilities pose security risks
-   c) Whether patterns suggest adversarial intent or oversight
-2. Form a final verdict: "benign" or "malware"
-
-## Output Format
-Return a JSON object:
-- verdict: "benign" or "malware"
-- confidence: 0.0-1.0
-- reasoning: 3-5 sentences explaining key factors
-- intent_category: A-H (most likely intent branch)
-- key_evidence: array of 2-5 most important evidence strings
-
-IMPORTANT:
-- Most deviations are from oversight (81.1%), not malice (18.9%)
-- A single low-risk undeclared capability is usually benign
-- Hidden download + execution patterns are very suspicious
-- Instruction hijacking + concealment strongly indicates malice`,
+  judgePrompt,
   {
     label: 'llm_judge',
     phase: 'Classify',
@@ -349,9 +482,10 @@ const INTENT_NAMES = {
 const finalResult = {
   skill_name: skillName,
   skill_dir: skillDir,
-  verdict: judgeResult?.verdict || 'benign',
-  confidence: judgeResult?.confidence || 0.5,
-  verdict_source: 'llm_judge',
+  // V_decl 无条件有害命中即恶意（不看上下文）；否则归 LLM Judge
+  verdict: vdeclFired ? 'malware' : (judgeResult?.verdict || 'benign'),
+  confidence: vdeclFired ? Math.max(0.9, judgeResult?.confidence || 0.5) : (judgeResult?.confidence || 0.5),
+  verdict_source: vdeclFired ? 'vdecl' : 'llm_judge',
   verdict_reasoning: judgeResult?.reasoning || '',
   declared_capabilities: dLlmResult?.declared_capabilities || [],
   instruction_capabilities: aLlmInstrResult?.instruction_capabilities || [],
@@ -359,12 +493,43 @@ const finalResult = {
   judge_intent_category: judgeResult?.intent_category || 'H',
   judge_intent_category_name: INTENT_NAMES[judgeResult?.intent_category] || '',
   judge_key_evidence: judgeResult?.key_evidence || [],
+  // V_decl: 声明轨道恶意通道（无偏差恶意）— 块级分类结果
+  vdecl: {
+    fired: vdeclFired,
+    verdict: vdeclFired ? 'malware' : 'benign',
+    unconditional_harmful: vdeclHits,
+    block_classifications: vdeclResult?.block_classifications || [],
+    no_deviation_malicious_count: vdeclNoDevMal,
+    coverage: vdeclResult?.coverage || {},
+  },
+  // Phase 0: structured blocks (downstream annotation units)
+  phase0: phase0,
   // Deterministic evidence passed through for traceability
   deterministic_evidence: detEvidence || null,
   _meta: {
     workflow_version: '0.2.1',
   },
 };
+
+// --- Write result to experiment/results/ mirroring the cases structure ---
+// The Workflow script has no filesystem access, so the file is written by a
+// subagent. Override the path via args.output.
+const relPath = skillDir.replace('experiment/cases/', '');
+const outputFile = (args && args.output) || `experiment/results/${relPath}/result.json`;
+const outputDir = outputFile.substring(0, outputFile.lastIndexOf('/'));
+try {
+  await agent(
+    `Write the JSON content below to the file at ${outputFile}.
+First create the parent directory if it does not exist: mkdir -p ${outputDir}
+Output ONLY the single word "ok" on success. Do not modify the JSON content.
+
+${JSON.stringify(finalResult, null, 2)}`,
+    { label: 'write-result' }
+  );
+  log(`Result written to ${outputFile}`);
+} catch (e) {
+  log(`Warning: could not write ${outputFile}: ${e}`);
+}
 
 log(`Verdict: ${finalResult.verdict} (confidence: ${(finalResult.confidence * 100).toFixed(0)}%)`);
 

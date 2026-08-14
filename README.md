@@ -367,6 +367,116 @@ npm run test:smoke
 # PASS: ai-wrapper
 ```
 
+**JSON 格式约束**（输出 schema 校验，`docs/schemas/` 为单一权威定义，字段只增不删）：
+
+```bash
+npm run schema:check
+# 校验 experiment/results/**/*.json：
+#   result.json     -> docs/schemas/result.schema.json     (确定性管线输出)
+#   <skill>_trace.json -> docs/schemas/trace.schema.json
+# 单文件校验（如完整审计最终结果）：
+# python scripts/schema_check.py --file <path> --schema final-result
+```
+
+- 三个 schema：`result.schema.json`（`run_deterministic_pipeline` 输出）、`final-result.schema.json`（`assemble_final_output` 完整审计最终结果）、`trace.schema.json`
+- 每条输出都带 `classification`（2×2 象限：deviation_axis / malicious_axis / quadrant）与 `capability_counts`，供基准判分与可视化消费
+- `_meta` 统一含 `audit_time`、`pipeline_version`、`trace_ref`（result 引用其 trace 的相对文件名）
+
+**基准判分**（对已产出的审计结果打分，malware 为正类；判分只用二元标签，不做象限准确率）：
+
+```bash
+# 先跑审计，再判分
+npm run batch-test      # 产出 experiment/results/ 下的 result.json
+npm run benchmark       # 准确率/精确率/召回率/F1 + FPR(误报) + FNR(漏报) + 确定性 vs LLM 对比
+```
+
+- ground truth 从路径段推导（benign/malware），`experiment/benchmark.yaml` 可覆盖（无标签路径）并附加说明
+- det-track：`result.json._det_verdict.verdict`（batch_audit 确定性）
+- llm-track：`result.json.verdict`（batch_workflow LLM judge；同一文件内与 det 对比）
+- 8000 样本场景：`batch_audit` 跑完全量后，`benchmark` 直接判分（`--cases-dir` / `--results-dir` 可指定目录）
+
+#### 引入新测试集进行测试
+
+**1. 准备数据集**。每个 skill 一个目录（含 `SKILL.md` + 可选 `scripts/` 等附件），按真实标签放入 `experiment/cases/` 下（新数据集用独立子目录名）：
+
+```text
+experiment/cases/
+├── std-cases-4/                 # 现有基准（保留时 batch 会一起跑）
+└── my-newset/                   # 新测试集，目录名任意
+    ├── benign/                  # 良性 skill
+    │   ├── skill-a/SKILL.md
+    │   └── ...
+    └── malware/                 # 恶意 skill
+        ├── skill-x/SKILL.md
+        └── ...
+```
+
+- 目录深度任意（`rglob("SKILL.md")` 递归发现），新 skill 直接放进对应标签目录即可
+- **真实标签必须体现在路径段 `benign`/`malware`**（`_derive_class()` 只认这两个目录名）——判分据此推导 ground truth，不使用 `.expected` 文件（防标签泄漏）。数据集若用其他标签名（如 clean/poisoned），需先重命名为 `benign`/`malware`
+
+**2. 自动注册到 `experiment/benchmark.yaml`**：
+
+```bash
+# 自动扫描数据集，从路径段推导标签，合并进 benchmark.yaml
+npm run register:dataset -- --dataset my-newset
+# 先预览不写文件：
+python scripts/register_dataset.py --dataset my-newset --dry-run
+# 已注册 case 的推导标签变化时，用 --overwrite 校正
+```
+
+- **幂等**：重复运行不产生重复条目，已注册 case 保留不动
+- flat dump 场景（数据集无 `benign`/`malware` 分目录）无法从路径推导标签，脚本会**跳过并列出**，需手动补 `expected`
+- 也可手动注册：为每个 case 加一行 `name`（相对 `experiment/cases/` 的 POSIX 路径）+ `expected` + `note`：
+
+```yaml
+cases:
+  - name: my-newset/malware/skill-x
+    expected: malware
+    note: 说明性备注
+```
+
+> 注意：脚本重写 yaml 时会丢弃其头部注释（pyyaml 不保留注释），数据条目不受影响。
+
+**3. 跑确定性批量审计**：
+
+```bash
+npm run batch-test
+# 每个 case 的完整结果写入 experiment/results/my-newset/<rel>/result.json
+# 调试 trace 写入同目录 <skill>_trace.json（trace/result 分离）
+# 终端输出 verdict 汇总 + 错误数
+```
+
+**4. 判分**（对已产出结果打分，不重新审计）：
+
+```bash
+# 全量判分（含 std-cases-4 + 新数据集，最简单）：
+npm run benchmark
+
+# 只判新数据集（避免混入 std-cases-4）：
+# 注意：--cases-dir 与 --results-dir 必须配套 —— batch 写入结果时保留相对
+# experiment/cases 的完整路径，两个参数需指向同一层级。
+python scripts/benchmark.py --cases-dir experiment/cases/my-newset --results-dir experiment/results/my-newset
+
+# 输出 per-case 表 + 指标（Acc/Prec/Recall/F1/FPR/FNR），malware 为正类
+```
+
+**5. （可选）跑 LLM 全流程**：用模式 B 的 `batch_workflow.js` 对新数据集出 LLM 判定后，`benchmark` 的 llm-track 自动填充，并与 det-track 同表对比（判断 LLM 环节是否有增益）。
+
+**6. 清理**：`experiment/results/` 已被 `.gitignore` 忽略，运行时产物不会被误提交；如需对一批结果重判分，直接重跑第 4 步即可。
+
+**HTML 审计报告**（自包含单页，浏览器打开，无需图片库/服务器）：
+
+```bash
+npm run report
+# 生成 experiment/results/report.html，双击浏览器打开
+```
+
+- **概览统计**：case 数 / 有结果数 / malware 数 / det、llm 判分数 / 匹配数
+- **指标表**：det 与 llm 轨道并排（Acc/Prec/Recall/F1/FPR/FNR，malware 为正类）
+- **每 case 可展开**：verdict + 象限 + 声明/实际/未声明（按风险着色）/过度声明能力、数据流链、rule_engine、relaxed_veto、findings
+- **搜索框**：按 case 名称 / verdict 实时过滤（内联 JS）
+- 单文件、内联 CSS/JS，无外部依赖
+
 ---
 
 ### 模式 B：Workflow 全流程（Claude Agent，Claude Code 运行时）
@@ -395,12 +505,94 @@ Workflow JS (编排器)
   ├─ 子代理 → python scripts/biv_audit.py <case> --evidence
   │           → 返回 Phi(s) 精简证据 (D/U/O + compound_flags
   │             + rule_engine + relaxed_veto + _det_verdict)
+  ├─ 子代理 → python scripts/prompt_render.py --multi d_llm_extract,a_llm_instr --skill-dir <case>
+  │           → 从统一模板 (src/biv/prompts.py) 渲染 LLM 提示词
   ├─ 子代理 → D_llm 语义声明能力提取 (并行)
   ├─ 子代理 → A_llm_instr 指令隐藏能力检测 (并行)
   └─ 子代理 → LLM Judge (CoT + xhigh)
+              ├─ 前置: prompt_render.py judge --skill-dir <case> (stdin 传 evidence_summary)
               ├─ 输入: Phi(s) 证据 + LLM 提取结果 + 原始内容
               └─ 输出: verdict + confidence + reasoning + intent_category
 ```
+
+**提示词统一模板管理**（唯一权威 `src/biv/prompts.py`）：
+
+```bash
+# 手动渲染某个模板（调试/查看）
+npm run prompt:render -- d_llm_extract --skill-dir <case> --variant single
+npm run prompt:render -- judge --skill-dir <case> --variant single < evidence.json   # stdin 传 vars
+npm run prompt:render -- taxonomy_ref
+# --multi 一次渲染多个，输出 JSON map：d_llm_extract,a_llm_instr
+```
+
+- 所有 LLM 提示词（d_llm_extract / a_llm_instr / classifier / judge / sentence_classifier）与 taxonomy 参考文本集中在 `src/biv/prompts.py`；JS workflow 通过子代理渲染获取，Python 管线（`render_classifier`）复用同一渲染函数——单一权威，不再双份
+- `taxonomy_ref` 从 `taxonomy.py` 自动生成（单一数据源，消除 JS 硬编码漂移）
+- `variant="single|batch"`：biv_workflow（详细版）/ batch_workflow（精简版）两个变体同源管理
+- 大/含引号的 vars（如 judge 的 `evidence_summary`）通过 **stdin** 传入，避免命令行参数引号转义问题
+- Python 侧旧 `build_declared_llm_prompt` / `build_instruction_llm_prompt` / `build_judge_prompt` / `build_classifier_prompt` 死代码已删除
+
+**第三阶段句子级分类（无偏差有害识别）**：三阶段架构明确为——Phase 1 提取 A/D 能力 → Phase 2 污点分析打**有偏差/无偏差**标签 → Phase 3 恶意审计打**恶意/非恶意**标签 → 2×2 组合成最终分类。Phase 3 的 `sentence_classifier` 模板将 skill.md 每句分类（`non_action` / `action_instruction`），对每条动作指令产出四象限分类，重点识别**无偏差恶意**（声明本身无条件有害，即使与代码一致）。识别维度参考 skill-scanner Phase 5 行为分析 + dangerous-code-patterns（U1 凭证外泄 / U2 反向shell / U3 dropper / U4 配置投毒 / U5 范围蔓延 / U6 指令窃取 / U7 勒索 / U8 指令级恶意），判定原则沿用"是否存在合理授权/合法用途"。
+
+- **不重不漏保证**：`normalize_skill_text()` 预处理删除空白行、逐行 strip，使 skill.md 每一行都成为分类单元，输出 `coverage` 字段校验 100% 覆盖
+- 渲染：`npm run prompt:render -- sentence_classifier --skill-dir <case> --variant single`（D/A/U/O 经 stdin 传入，sentences 自动从 skill 文本规范化）
+- **已接线到 workflow**：`biv_workflow.js` / `batch_workflow.js` 在 Phase 3 用一个子智能体渲染并执行句子级分类（`vdecl_sentence_classifier`），D/A/U/O 取自确定性证据；结果写入 finalResult 的 `vdecl` 字段（`unconditional_harmful` 命中即判 malware，`verdict_source='vdecl'`），并作为证据喂给 LLM Judge
+
+**每 case 标注页面（前端已就绪，分类先用 mock）**：
+
+```bash
+npm run page -- <skill-dir> --result <result.json> --mock
+# 输出 experiment/results/pages/<skill>_page.html，浏览器打开
+```
+
+- 展示 skill.md 原文，每行**六类着色**（恶意=暖色 / 非恶意=冷色）：非动作·恶意 / 非动作·非恶意 / 动作·无偏差恶意 / 动作·有偏差恶意 / 动作·无偏差非恶意 / 动作·有偏差非恶意
+- **动作指令加粗** + ▶ 可点击，点击弹出**执行流卡片**（有无偏差 / 偏差类型 / flow 链 / 核心指令）
+- 当前分类用 mock 演示（页面标注"演示标注"），待 Phase 3 `sentence_classifier` 输出接入后替换
+
+**实现该前端 result 缺少的字段**：
+
+| 字段 | 现状 | 用途 |
+|------|------|------|
+| `phase1.skill_body`（原文） | ✅ 已实现（orchestrator 恢复） | 页面展示 skill.md 原文 |
+| `sentence_classifications[]` | 🟡 LLM 模式（workflow 已接线） | 每行分类（kind + 六类 + capabilities），Phase 3 `sentence_classifier` 输出 |
+| 每行 `deviation_label` | 🟡 LLM 模式（sentence_classifier 输出）；确定性模式待反查 | 执行流卡片「有无偏差」 |
+| 每行 `flows` | 🔴 待架构方案（flows_ast 能力级 + 句子映射） | 执行流卡片「flow」 |
+| `core_instruction` | ✅ 句子本身 | 卡片「核心指令」（前端自取该行文本） |
+| `capability_code_evidence`（**代码片段+行号**） | ✅ 已实现（orchestrator 从 ast/regex findings 组装；JS/Shell supplement 无行号分支待增强） | 前端点击恶意语句 → 查看**具体代码片段和行号** |
+
+已就位：`_det_verdict.verdict`、`classification.quadrant`、`phase2.undeclared/overdeclared`（偏差类型来源）。
+
+**`capability_code_evidence` 记录格式**（待实现：污点分析与静态 D/A 识别时额外记录各类别对应的代码信息）：
+
+```jsonc
+// 顶层：capability_code_evidence: { "<capability>": {...} }
+{
+  "net-socket-out": {
+    "source": "ast",                          // ast 污点分析 / regex 静态识别 / declared 声明
+    "locations": [
+      {
+        "file": "scripts/generateContent.js", // 相对 skill 目录路径
+        "line_start": 32,                     // 代码行号范围
+        "line_end": 56,
+        "col_start": 4,
+        "col_end": 8,
+        "code": "net.createConnection(port, '${host}', () => {",   // 精确匹配片段
+        "snippet": "const client = net.createConnection(port, '${host}', () => {...}"  // 上下文片段（用于前端高亮）
+      }
+    ]
+  },
+  "proc-code-eval": {
+    "source": "regex",
+    "locations": [
+      { "file": "scripts/generateContent.js", "line_start": 45, "col_start": 1,
+        "code": "exec(data.toString(), (err, stdout) => {" }
+    ]
+  }
+}
+```
+
+- **来源**：`ast`（污点分析，`ast_analyzer.py`）/ `regex`（静态模式，`regex_engine.py`）/ `declared`（frontmatter 声明，无代码行号，`line_start` 置空、用 `evidence_location="frontmatter"`）
+- 一个能力可有多个 `locations`（多文件/多位置）；`snippet` 为带上下文的片段，供前端弹窗高亮显示
+- **前端消费**：点击恶意语句（`sentence_classifications[i].classification` 含 malicious）→ 卡片新增「代码片段」区，按该句关联的能力查 `capability_code_evidence` 展示 `file:line_start` + 代码高亮
 
 ---
 

@@ -1,0 +1,22 @@
+# BIV benchmark manifest
+#
+# Ground truth label defaults to the path segment (benign/ or malware/). Entries
+# here (a) document each registered case's expected label + note, and (b) override
+# the derived label when the path has no label segment (e.g. a flat 8000-sample dump).
+#
+# Paths are relative to experiment/cases/ and use POSIX separators.
+# Auto-register new datasets with: python scripts/register_dataset.py --dataset <name>
+
+cases:
+  - name: std-cases-4/benign/1password-1
+    expected: benign
+    note: 良性密码管理器 — 已知 rule_3 误报（声明 cred-read，实际为正常工具）
+  - name: std-cases-4/benign/2captcha
+    expected: benign
+    note: CAPTCHA 服务 CLI 封装
+  - name: std-cases-4/malware/000-jeremy-content-consistency-validator__CI_B4
+    expected: malware
+    note: dropper — 下载即执行
+  - name: std-cases-4/malware/ai-wrapper-product__CI_B6
+    expected: malware
+    note: 反向 shell（net.createConnection + stdin/stdout 重定向）

@@ -51,6 +51,30 @@ class PhaseInfo:
     warn_count: int = 0
 
 
+@dataclass
+class AgentCall:
+    """A single LLM agent call log entry (trace.agent_calls)."""
+
+    call_id: str
+    role: str  # d_llm | a_llm_instr | classifier | judge | trace
+    agent_id: Optional[str] = None
+    prompt_len: int = 0
+    duration_ms: Optional[float] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    retries: int = 0
+    raw_output_hash: Optional[str] = None
+
+
+@dataclass
+class DecisionRecord:
+    """A recorded decision point — why a verdict/classification was made (trace.decisions)."""
+
+    record_id: str
+    decision: str
+    reason: str
+
+
 class TraceContext:
     """Thread-safe trace recorder for BIV pipeline execution.
 
@@ -64,6 +88,10 @@ class TraceContext:
         self.start_time = time.time()
         self.records: List[TraceRecord] = []
         self.phases: Dict[str, PhaseInfo] = {}
+        self._agent_calls: List[AgentCall] = []
+        self._decisions: List[DecisionRecord] = []
+        self._call_seq: int = 0
+        self._decision_seq: int = 0
         self._current_phase: str = "init"
         self._lock = threading.Lock()
 
@@ -164,6 +192,47 @@ class TraceContext:
             data={"metric_name": name, "metric_value": value},
         )
 
+    def agent_call(
+        self,
+        role: str,
+        *,
+        agent_id: Optional[str] = None,
+        prompt_len: int = 0,
+        duration_ms: Optional[float] = None,
+        tokens_in: Optional[int] = None,
+        tokens_out: Optional[int] = None,
+        retries: int = 0,
+        raw_output_hash: Optional[str] = None,
+    ) -> str:
+        """Record an LLM agent call (extract/classify/judge/trace). Returns the call_id."""
+        with self._lock:
+            self._call_seq += 1
+            call_id = f"call-{self._call_seq:03d}"
+            self._agent_calls.append(
+                AgentCall(
+                    call_id=call_id,
+                    role=role,
+                    agent_id=agent_id,
+                    prompt_len=prompt_len,
+                    duration_ms=duration_ms,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    retries=retries,
+                    raw_output_hash=raw_output_hash,
+                )
+            )
+        return call_id
+
+    def decision(self, decision: str, reason: str) -> str:
+        """Record a decision point (e.g. relaxed-veto fired, rule matched). Returns the record_id."""
+        with self._lock:
+            self._decision_seq += 1
+            record_id = f"decision-{self._decision_seq:03d}"
+            self._decisions.append(
+                DecisionRecord(record_id=record_id, decision=decision, reason=reason)
+            )
+        return record_id
+
     def finalize(self, verdict: str, confidence: float) -> None:
         """Mark pipeline as complete with final verdict."""
         total_duration = (time.time() - self.start_time) * 1000
@@ -209,6 +278,28 @@ class TraceContext:
                 "phases": phase_summaries,
                 "total_records": len(self.records),
                 "records": [self._record_to_dict(r) for r in self.records],
+                "agent_calls": [
+                    {
+                        "call_id": c.call_id,
+                        "role": c.role,
+                        "agent_id": c.agent_id,
+                        "prompt_len": c.prompt_len,
+                        "duration_ms": c.duration_ms,
+                        "tokens_in": c.tokens_in,
+                        "tokens_out": c.tokens_out,
+                        "retries": c.retries,
+                        "raw_output_hash": c.raw_output_hash,
+                    }
+                    for c in self._agent_calls
+                ],
+                "decisions": [
+                    {
+                        "record_id": d.record_id,
+                        "decision": d.decision,
+                        "reason": d.reason,
+                    }
+                    for d in self._decisions
+                ],
             }
 
     def to_json(self, indent: int = 2) -> str:

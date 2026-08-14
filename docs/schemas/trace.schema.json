@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://biv.local/schemas/trace.schema.json",
+  "title": "BIV Trace",
+  "description": "Output of TraceContext.to_dict(); written as <skill>_trace.json next to result.json. Records process steps; agent_calls logs LLM invocations; decisions logs why a verdict was made. Trace NEVER mixes into result.json.",
+  "type": "object",
+  "required": [
+    "skill_name", "skill_dir", "start_time", "total_duration_ms",
+    "phases", "total_records", "records", "agent_calls", "decisions"
+  ],
+  "properties": {
+    "skill_name": { "type": "string" },
+    "skill_dir": { "type": "string" },
+    "start_time": { "type": "string" },
+    "total_duration_ms": { "type": "number" },
+    "phases": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["name", "start_time", "step_count", "error_count", "warn_count", "record_count"],
+        "properties": {
+          "name": { "type": "string" },
+          "start_time": { "type": "string" },
+          "step_count": { "type": "integer" },
+          "error_count": { "type": "integer" },
+          "warn_count": { "type": "integer" },
+          "record_count": { "type": "integer" }
+        }
+      }
+    },
+    "total_records": { "type": "integer" },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["timestamp", "phase", "step", "level", "message"],
+        "properties": {
+          "timestamp": { "type": "string" },
+          "phase": { "type": "string" },
+          "step": { "type": "string" },
+          "level": { "enum": ["INFO", "WARN", "ERROR", "PHASE", "METRIC"] },
+          "message": { "type": "string" },
+          "data": { "type": ["object", "null"] },
+          "duration_ms": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "agent_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["call_id", "role"],
+        "properties": {
+          "call_id": { "type": "string" },
+          "role": { "type": "string" },
+          "agent_id": { "type": ["string", "null"] },
+          "prompt_len": { "type": "integer" },
+          "duration_ms": { "type": ["number", "null"] },
+          "tokens_in": { "type": ["integer", "null"] },
+          "tokens_out": { "type": ["integer", "null"] },
+          "retries": { "type": "integer" },
+          "raw_output_hash": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["record_id", "decision", "reason"],
+        "properties": {
+          "record_id": { "type": "string" },
+          "decision": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}

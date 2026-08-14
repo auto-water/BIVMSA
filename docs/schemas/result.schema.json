@@ -1,0 +1,264 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://biv.local/schemas/result.schema.json",
+  "title": "BIV Deterministic Pipeline Result",
+  "description": "Output of run_deterministic_pipeline(); written by batch_audit.py to experiment/results/<rel>/result.json. Trace is NEVER embedded — referenced via _meta.trace_ref. Fields only grow: adding new keys is allowed (additionalProperties default true).",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["error"],
+      "properties": { "error": { "type": "string" } },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": [
+        "phase0", "phase1", "phase2", "phase3_deterministic", "llm_prompts",
+        "finding_counts", "_det_verdict", "classification", "capability_counts", "_meta"
+      ],
+      "properties": {
+        "phase0": {
+          "type": "object",
+          "required": ["unit", "count", "blocks"],
+          "properties": {
+            "unit": { "type": "string" },
+            "count": { "type": "integer" },
+            "blocks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["block_id", "line_start", "line_end", "text", "sentences"],
+                "properties": {
+                  "block_id": { "type": "integer" },
+                  "kind": { "enum": ["frontmatter", "trigger", "fallback-line"] },
+                  "line_start": { "type": "integer" },
+                  "line_end": { "type": "integer" },
+                  "trigger_condition": { "type": "string" },
+                  "text": { "type": "string" },
+                  "sentences": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "vdecl": {
+          "type": "object",
+          "properties": {
+            "fired": { "type": "boolean" },
+            "verdict": { "enum": ["benign", "malware"] },
+            "unconditional_harmful": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "pattern": { "type": "string" },
+                  "anchor": { "type": "string" },
+                  "block_id": { "type": "integer" },
+                  "evidence": { "type": "string" }
+                }
+              }
+            },
+            "block_classifications": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["block_id", "text", "kind", "deviation_label", "malicious_label", "classification", "capabilities", "reason"],
+                "properties": {
+                  "block_id": { "type": "integer" },
+                  "text": { "type": "string" },
+                  "kind": { "enum": ["action_instruction", "non_action"] },
+                  "deviation_label": { "enum": ["deviated", "no_deviation"] },
+                  "malicious_label": { "enum": ["malicious", "benign"] },
+                  "classification": { "enum": ["no-deviation-malicious", "no-deviation-benign", "deviated-malicious", "deviated-benign"] },
+                  "capabilities": { "type": "array", "items": { "type": "string" } },
+                  "reason": { "type": "string" }
+                }
+              }
+            },
+            "no_deviation_malicious_count": { "type": "integer" },
+            "coverage": {
+              "type": "object",
+              "properties": {
+                "total_blocks": { "type": "integer" },
+                "classified_blocks": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "phase1": {
+          "type": "object",
+          "required": ["skill_name", "skill_dir", "structure", "frontmatter",
+                       "tools", "D_deterministic", "d_det_evidence", "A_ast",
+                       "A_regex", "flows_ast", "ast_findings", "regex_findings", "urls"],
+          "properties": {
+            "skill_name": { "type": "string" },
+            "skill_dir": { "type": "string" },
+            "structure": {
+              "type": "object",
+              "required": ["has_skill_md", "has_references", "has_scripts", "reference_files", "script_files"],
+              "properties": {
+                "has_skill_md": { "type": "boolean" },
+                "has_references": { "type": "boolean" },
+                "has_scripts": { "type": "boolean" },
+                "reference_files": { "type": "array", "items": { "type": "string" } },
+                "script_files": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "frontmatter": { "type": "object" },
+            "tools": {
+              "type": ["object", "null"],
+              "properties": {
+                "tools": { "type": "array", "items": { "type": "string" } },
+                "has_bash": { "type": "boolean" },
+                "has_write": { "type": "boolean" },
+                "has_edit": { "type": "boolean" },
+                "has_webfetch": { "type": "boolean" },
+                "has_task": { "type": "boolean" },
+                "unrestricted": { "type": "boolean" }
+              }
+            },
+            "D_deterministic": { "type": "array", "items": { "type": "string" } },
+            "d_det_evidence": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["capability", "source_type", "evidence", "evidence_location"],
+                "properties": {
+                  "capability": { "type": "string" },
+                  "source_type": { "type": "string" },
+                  "evidence": { "type": "string" },
+                  "evidence_location": { "type": "string" }
+                }
+              }
+            },
+            "A_ast": { "type": "array", "items": { "type": "string" } },
+            "A_regex": { "type": "array", "items": { "type": "string" } },
+            "flows_ast": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["source", "source_location", "sink", "sink_location"],
+                "properties": {
+                  "source": { "type": "string" },
+                  "source_location": { "type": "string" },
+                  "transforms": { "type": "array" },
+                  "sink": { "type": "string" },
+                  "sink_location": { "type": "string" }
+                }
+              }
+            },
+            "skill_body": { "type": "string" },
+            "capability_code_evidence": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "required": ["source", "locations"],
+                "properties": {
+                  "source": { "type": "string" },
+                  "locations": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "file": { "type": ["string", "null"] },
+                        "line_start": { "type": ["integer", "null"] },
+                        "line_end": { "type": ["integer", "null"] },
+                        "col_start": { "type": ["integer", "null"] },
+                        "col_end": { "type": ["integer", "null"] },
+                        "code": { "type": ["string", "null"] },
+                        "snippet": { "type": ["string", "null"] }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "ast_findings": { "type": "array" },
+            "regex_findings": { "type": "array" },
+            "urls": {
+              "type": "object",
+              "required": ["total", "untrusted", "untrusted_count", "trusted_count"],
+              "properties": {
+                "total": { "type": "integer" },
+                "untrusted": { "type": "array" },
+                "untrusted_count": { "type": "integer" },
+                "trusted_count": { "type": "integer" }
+              }
+            }
+          }
+        },
+        "phase2": {
+          "type": "object",
+          "required": ["undeclared", "overdeclared", "compound_flags", "risk_assessment", "instruction_signals"],
+          "properties": {
+            "undeclared": { "type": "array", "items": { "type": "string" } },
+            "overdeclared": { "type": "array", "items": { "type": "string" } },
+            "compound_flags": { "type": "object" },
+            "phi": { "type": "object" },
+            "risk_assessment": { "type": "object" },
+            "instruction_signals": { "type": "number" }
+          }
+        },
+        "phase3_deterministic": {
+          "type": "object",
+          "required": ["rule_engine", "relaxed_veto"],
+          "properties": {
+            "rule_engine": { "type": "object" },
+            "relaxed_veto": { "type": "object" }
+          }
+        },
+        "llm_prompts": { "type": "object" },
+        "finding_counts": {
+          "type": "object",
+          "properties": {
+            "critical": { "type": "integer" },
+            "high": { "type": "integer" },
+            "medium": { "type": "integer" },
+            "total": { "type": "integer" }
+          }
+        },
+        "_det_verdict": {
+          "type": "object",
+          "required": ["verdict", "confidence", "source"],
+          "properties": {
+            "verdict": { "enum": ["benign", "malware"] },
+            "confidence": { "type": "number" },
+            "source": { "type": "string" }
+          }
+        },
+        "classification": {
+          "type": "object",
+          "required": ["deviation_axis", "malicious_axis", "quadrant"],
+          "properties": {
+            "deviation_axis": { "enum": ["deviated", "none"] },
+            "malicious_axis": { "enum": ["malicious", "benign"] },
+            "quadrant": { "enum": ["deviated-malicious", "deviated-benign", "no-deviation-malicious", "no-deviation-benign"] }
+          }
+        },
+        "capability_counts": {
+          "type": "object",
+          "required": ["declared", "actual", "undeclared", "overdeclared"],
+          "properties": {
+            "declared": { "type": "integer" },
+            "actual": { "type": "integer" },
+            "undeclared": { "type": "integer" },
+            "overdeclared": { "type": "integer" }
+          }
+        },
+        "_meta": {
+          "type": "object",
+          "required": ["timestamp", "pipeline_version"],
+          "properties": {
+            "timestamp": { "type": "string" },
+            "audit_time": { "type": "string" },
+            "pipeline_version": { "type": "string" },
+            "trace_file": { "type": ["string", "null"] },
+            "trace_ref": { "type": ["string", "null"] },
+            "trace_summary": { "type": "string" }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -32,6 +32,7 @@ from .taxonomy import (
     RiskTier,
 )
 from .skill_parser import split_frontmatter, walk_skill_files
+from .chunking import build_phase0  # Phase 0: block chunking (semantic annotation units)
 from .declared_track import (
     extract_tools_from_frontmatter,
     map_tools_to_capabilities,
@@ -53,7 +54,6 @@ from .deviation import (
 )
 from .root_cause import (
     apply_rule_engine,
-    build_classifier_prompt,
     validate_classifier_output,
 )
 from .malicious_detect import (
@@ -61,9 +61,93 @@ from .malicious_detect import (
     validate_judge_output,
     final_verdict,
 )
+from .prompts import render_classifier
 from .trace import TraceContext
 
 logger = logging.getLogger(__name__)
+
+# Version of the audit output contract. Bump on any change to the result /
+# trace JSON shape (see docs/schemas/). Mirrored in workflow _meta.workflow_version.
+PIPELINE_VERSION = "0.3.0"
+
+
+def build_classification(
+    verdict: str, undeclared: List[str], overdeclared: List[str]
+) -> Dict:
+    """Derive the 2x2 classification block (deviation x malicious axes).
+
+    deviation_axis: "deviated" iff U or O is non-empty, else "none".
+    malicious_axis: "malicious" iff verdict == "malware", else "benign".
+    quadrant: one of no-deviation-benign / no-deviation-malicious /
+              deviated-benign / deviated-malicious.
+    """
+    deviation_axis = "deviated" if (undeclared or overdeclared) else "none"
+    malicious_axis = "malicious" if verdict == "malware" else "benign"
+    dev_label = "deviated" if deviation_axis == "deviated" else "no-deviation"
+    return {
+        "deviation_axis": deviation_axis,
+        "malicious_axis": malicious_axis,
+        "quadrant": f"{dev_label}-{malicious_axis}",
+    }
+
+
+def build_capability_counts(
+    declared: Set[str], actual: Set[str], undeclared: List[str], overdeclared: List[str]
+) -> Dict:
+    """Counts for benchmark scoring (declared/actual/undeclared/overdeclared)."""
+    return {
+        "declared": len(declared),
+        "actual": len(actual),
+        "undeclared": len(undeclared),
+        "overdeclared": len(overdeclared),
+    }
+
+
+def _build_capability_code_evidence(
+    ast_findings: List[Dict], regex_findings: List[Dict]
+) -> Dict:
+    """Assemble capability_code_evidence from AST + regex findings.
+
+    Output: { "<capability>": {"source": "ast|regex", "locations": [
+        {"file", "line_start", "line_end", "col_start", "col_end", "code", "snippet"}]} }
+
+    Frontend: click a malicious sentence -> capability -> code snippet + line number.
+    Finding locations are "file:line" (regex) or "file"/"file:line" (ast, enriched by
+    _attach_finding_meta in ast_analyzer); evidence is the code line/snippet.
+    """
+    ev: Dict[str, Dict] = {}
+
+    def _add(cap: str, source: str, file: Optional[str], line: Optional[int], code: Optional[str]) -> None:
+        entry = ev.setdefault(cap, {"source": source, "locations": []})
+        entry["locations"].append(
+            {
+                "file": file,
+                "line_start": line,
+                "line_end": None,
+                "col_start": None,
+                "col_end": None,
+                "code": code,
+                "snippet": code,
+            }
+        )
+
+    for f in ast_findings:
+        for cap in f.get("capabilities_mapped", []) or []:
+            _add(cap, "ast", f.get("file"), f.get("line_start"), f.get("evidence"))
+    for f in regex_findings:
+        file_part, line_part = None, None
+        loc = f.get("location", "")
+        if ":" in loc:
+            file_part, _, ls = loc.rpartition(":")
+            try:
+                line_part = int(ls)
+            except ValueError:
+                line_part = None
+        else:
+            file_part = loc or None
+        for cap in f.get("capabilities_mapped", []) or []:
+            _add(cap, "regex", file_part, line_part, f.get("evidence"))
+    return ev
 
 
 # =============================================================================
@@ -202,6 +286,10 @@ def phase1_extract_capabilities(
         "structure": structure,
         "frontmatter": sanitized_fm,
         "tools": tools_info,
+        # 原始 skill 正文（前端展示原文；此前被精简，现恢复）
+        "skill_body": body,
+        # 能力 → 代码片段 + 行号（前端恶意句点击查看代码）
+        "capability_code_evidence": _build_capability_code_evidence(ast_findings, regex_findings),
         # Deterministic extraction results
         "D_deterministic": sorted(D_det),
         "d_det_evidence": d_det_evidence,
@@ -361,7 +449,7 @@ def build_phase3_llm_prompts(
     # Classifier prompt (only if rule engine didn't match)
     classifier_prompt = None
     if not rule_engine_result.get("matched"):
-        classifier_prompt = build_classifier_prompt(
+        classifier_prompt = render_classifier(
             U, O, A, D, flows, compound_flags, skill_name
         )
 
@@ -415,8 +503,9 @@ def assemble_final_output(
     judge_reasoning: str,
     judge_intent_category: str,
     judge_key_evidence: List[str],
+    trace_ref: Optional[str] = None,
 ) -> Dict:
-    """Assemble the final JSON output matching the agreed schema."""
+    """Assemble the final JSON output matching the agreed schema (see docs/schemas/result.schema.json)."""
     # Merge declared
     D_det = set(phase1.get("D_deterministic", []))
     D_all, d_all_evidence = merge_declared(D_det, phase1.get("d_det_evidence", []), D_llm, d_llm_evidence)
@@ -522,6 +611,8 @@ def assemble_final_output(
         "confidence": round(verdict_confidence, 4),
         "verdict_source": verdict_source,
         "verdict_reasoning": judge_reasoning,
+        "classification": build_classification(verdict, sorted(U), sorted(O)),
+        "capability_counts": build_capability_counts(D_all, A_all, sorted(U), sorted(O)),
         "structure": phase1.get("structure", {}),
         "frontmatter": phase1.get("frontmatter", {}),
         "taxonomy": taxonomy_output,
@@ -576,6 +667,9 @@ def assemble_final_output(
             "d_llm_rejected": d_llm_rejected,
             "a_llm_instr_rejected": a_llm_instr_rejected,
             "timestamp": datetime.now().isoformat(),
+            "audit_time": datetime.now().isoformat(),
+            "pipeline_version": PIPELINE_VERSION,
+            "trace_ref": trace_ref,
         },
     }
 
@@ -765,14 +859,26 @@ def run_deterministic_pipeline(
         det_verdict = "malware"
         det_confidence = 0.90
         det_source = "relaxed_veto"
+        trace.decision(
+            "verdict=malware (relaxed_veto)",
+            phase3_det["relaxed_veto"].get("reason", "relaxed veto fired"),
+        )
     elif phase3_det["rule_engine"]["intent_category"] in ADVERSARIAL_BRANCHES:
         det_verdict = "malware"
         det_confidence = 0.80
         det_source = "deterministic_rule"
+        trace.decision(
+            "verdict=malware (adversarial rule)",
+            f"rule_engine intent_category={phase3_det['rule_engine']['intent_category']}",
+        )
     else:
         det_verdict = "benign"
         det_confidence = 0.70
         det_source = "deterministic_rule"
+        trace.decision(
+            "verdict=benign (no adversarial signal)",
+            "no relaxed-veto fired, no adversarial rule matched",
+        )
 
     trace.finalize(det_verdict, det_confidence)
     trace.metric("pipeline_total_ms", (time.time() - t_pipeline_start) * 1000)
@@ -793,8 +899,19 @@ def run_deterministic_pipeline(
             logger.warning(f"Cannot write trace file {trace_file}: {e}")
             trace_file = None
 
+    # Phase 0: block chunking — semantic annotation units for downstream labeling.
+    # Computed deterministically from SKILL.md content (one block = one sentence for
+    # now; block structure supports future larger blocks). Frontend reads this to
+    # render blocks; the workflow annotates blocks by block_id.
+    try:
+        _skill_content = skill_path.joinpath("SKILL.md").read_text(encoding="utf-8", errors="replace")
+        phase0 = build_phase0(_skill_content)
+    except OSError:
+        phase0 = {"unit": "sentence", "count": 0, "blocks": []}
+
     return {
         # --- Result (audit data; trace NOT mixed in) ---
+        "phase0": phase0,
         "phase1": phase1,
         "phase2": phase2,
         "phase3_deterministic": phase3_det,
@@ -806,10 +923,20 @@ def run_deterministic_pipeline(
             "confidence": det_confidence,
             "source": det_source,
         },
+        # --- 2x2 classification + counts (benchmark scoring) ---
+        "classification": build_classification(
+            det_verdict, phase2.get("undeclared", []), phase2.get("overdeclared", [])
+        ),
+        "capability_counts": build_capability_counts(
+            D_det, A_det, phase2.get("undeclared", []), phase2.get("overdeclared", [])
+        ),
         # --- Debug metadata: trace file reference + summary only ---
         "_meta": {
             "timestamp": datetime.now().isoformat(),
+            "audit_time": datetime.now().isoformat(),
+            "pipeline_version": PIPELINE_VERSION,
             "trace_file": str(trace_file) if trace_file else None,
+            "trace_ref": trace_file.name if trace_file else None,
             "trace_summary": trace_summary,
         },
     }

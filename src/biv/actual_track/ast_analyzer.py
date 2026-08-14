@@ -1359,6 +1359,52 @@ class ShellTaintAnalyzer:
 # =============================================================================
 
 
+# finding type 关键词 → 能力（AST finding 的能力归属提示；构造时未写 capabilities_mapped 的按此补）
+_AST_TYPE_TO_CAPS = [
+    ("shell=True", ["proc-exec-shell"]),
+    ("Shell Execution", ["proc-exec-shell"]),
+    ("Dynamic Code Execution", ["proc-code-eval"]),
+    ("IIFE", ["instr-silent-exec"]),
+    ("Auto-Execution", ["instr-silent-exec"]),
+    ("Reverse Shell", ["net-socket-out"]),
+    ("Shell I/O Redirection", ["net-socket-out"]),
+    ("Dangerous JS Pattern", ["proc-exec", "net-socket-out"]),  # 歧义 type，给两个候选
+    ("child_process", ["proc-exec"]),
+    ("Download & Execute", ["net-download-exec"]),
+    ("Base64", ["enc-base64", "proc-exec-shell"]),
+    ("eval", ["proc-code-eval"]),
+]
+
+
+def _attach_finding_meta(findings: List[Dict]) -> List[Dict]:
+    """为 AST findings 附加 capabilities_mapped 与结构化位置（file/line_start）。
+
+    AST findings 自带 location（"file:line" 或 "file"）+ evidence（该行代码片段）；
+    此处补充能力归属与行号，供 orchestrator 组装 capability_code_evidence（前端查看代码）。
+    """
+    for f in findings:
+        if "capabilities_mapped" not in f:
+            t = f.get("type", "")
+            caps = []
+            for kw, c in _AST_TYPE_TO_CAPS:
+                if kw.lower() in t.lower():
+                    caps.extend(c)
+            if caps:
+                f["capabilities_mapped"] = sorted(set(caps))
+        loc = f.get("location", "")
+        if ":" in loc:
+            file_part, _, line_part = loc.rpartition(":")
+            f["file"] = file_part
+            try:
+                f["line_start"] = int(line_part)
+            except ValueError:
+                f["line_start"] = None
+        else:
+            f["file"] = loc or None
+            f["line_start"] = None
+    return findings
+
+
 def run_ast_analysis(
     script_files: List[Path],
 ) -> Tuple[Set[str], List[Dict], List[Dict], Dict[str, bool]]:
@@ -1414,4 +1460,5 @@ def run_ast_analysis(
         "data_lineage_violation": False,
     }
 
+    _attach_finding_meta(all_findings)
     return all_capabilities, all_flows, all_findings, compound_flags
