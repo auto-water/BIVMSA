@@ -247,8 +247,7 @@ def load_real_annotations(result_file: Path) -> dict:
 
 
 def _build_page(name: str, items: list, verdict: str, quadrant: str,
-                unconditional: list, mode: str,
-                d_caps: list, a_caps: list, intended: str) -> str:
+                mode: str, d_caps: list, a_caps: list, intended: str) -> str:
     # items: [{text, kind, cls, flow}]
     # Skill 描述能力空间：D/A 标签 + intended workflow
     _tags = lambda caps, extra: ("".join(
@@ -297,21 +296,6 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
         f'<span class="lg" style="background:{v["bg"]}">{v["label"]}</span>'
         for v in CLS.values()
     )
-
-    uncond_html = ""
-    if unconditional:
-        hits = "".join(
-            f'<li>[!] <b>{html_escape(h.get("pattern",""))}</b> — {html_escape(h.get("evidence",""))}'
-            f' <span style="color:#999">(block {h.get("block_id","?")} · anchor {html_escape(h.get("anchor",""))})</span></li>'
-            for h in unconditional if h and h.get("pattern")
-        )
-        if hits:
-            uncond_html = (
-                '<div style="margin:8px 24px 0;padding:10px 14px;background:#fff0f0;'
-                'border:1px solid #f2b8b8;border-radius:8px;font-size:13px;">'
-                '<b style="color:#c0392b;">V_decl 无条件有害命中（无偏差恶意）</b><ul>'
-                + hits + "</ul></div>"
-            )
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
@@ -375,7 +359,6 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   <div class="legend">{legend}</div>
   {capspace}
 </header>
-{uncond_html}
 <main id="skill">
 {''.join(rows_html)}
 </main>
@@ -499,7 +482,7 @@ def main() -> None:
 
     target_dir.mkdir(parents=True, exist_ok=True)
     out = target_dir / f"{skill_dir.name}_page.html"
-    out.write_text(_build_page(name, items, verdict, quadrant, unconditional, mode,
+    out.write_text(_build_page(name, items, verdict, quadrant, mode,
                                d_caps, a_caps, intended), encoding="utf-8")
     _emit(f"[page] {out}  ({len(items)} rows)  verdict={verdict}  {mode}")
 
