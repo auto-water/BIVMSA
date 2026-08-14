@@ -348,9 +348,6 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
             f'<div class="{extra}" data-idx="{i}" '
             f'style="background:{cls_style};{bold}">{html_escape(it["text"])}</div>'
         )
-        # 恶意块下方渲染恶意调用链（Phase 4 数据；无则 flow_items 从 code_evidence fallback）
-        if "malicious" in it["cls"]:
-            rows_html.append(_chain_html(it))
 
     legend = "".join(
         f'<span class="lg" style="background:{v["bg"]}">{v["label"]}</span>'
@@ -489,6 +486,10 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
     <div class="field"><span class="k">外部关联代码片段</span><span class="v" id="m-code"></span></div>
     <div class="field"><span class="k">判定理由</span><span class="v" id="m-reason" style="background:#f6f8fa;padding:6px 8px;border-radius:6px;display:inline-block;"></span></div>
     <div class="field"><span class="k">核心指令(摘要)</span><span class="v" id="m-core" style="background:#f6f8fa;padding:6px 8px;border-radius:6px;display:inline-block;white-space:pre-wrap;"></span></div>
+    <div class="field" style="margin-top:10px;">
+      <div style="font-weight:600;color:#444;font-size:13px;margin-bottom:4px;">恶意调用链</div>
+      <div id="m-graph" class="attack-graph" style="margin:0;"><svg class="ag-edges"></svg></div>
+    </div>
   </div>
 </div>
 
@@ -520,6 +521,26 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
     const _core = (it.flow && it.flow.core_instruction) || '';
     document.getElementById('m-core').textContent = _core ||
       (it.text.length > 140 ? it.text.slice(0, 140) + '…' : it.text);
+    // 恶意调用链图（仅恶意块；渲染到 modal 图容器）
+    const mg = document.getElementById('m-graph');
+    mg.innerHTML = '<svg class="ag-edges"></svg>';
+    if (it.cls && it.cls.indexOf('malicious') !== -1) {{
+      const ac = (it.flow && it.flow.attack_chain) || {{}};
+      const flowItems = ac.flow_items || (it.flow && it.flow.code_evidence) || [];
+      const nodes = [
+        {{id:'n0', type:'user', title:'User', text:''}},
+        {{id:'n1', type:'input', title:'触发输入', text: ac.user_input || '（待 Phase 4 构造触发输入）'}},
+        {{id:'n2', type:'block', title:'恶意块 #' + (it.flow.block_id != null ? it.flow.block_id : '?'), text: it.flow.trigger_condition || ''}},
+      ];
+      const edges = [['n0','n1'], ['n1','n2']];
+      flowItems.forEach((fi, i) => {{
+        const nid = 'n' + (3 + i);
+        const rel = String(fi.file || '?').split(/[\\\\/]/).slice(-2).join('/');
+        nodes.push({{id:nid, type:'code', title:fi.capability || '', text: rel + ':' + (fi.line_start != null ? fi.line_start : '?'), code: fi.code || ''}});
+        edges.push(['n2', nid]);
+      }});
+      renderGraph('m-graph', nodes, edges);
+    }}
     modal.classList.add('show');
   }}
   function hide() {{ modal.classList.remove('show'); }}
