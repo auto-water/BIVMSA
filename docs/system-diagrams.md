@@ -74,7 +74,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    PHI[Φ(s): D/A/U/O + flows + compound] --> VA{V_actual relaxed_veto?}
+    PHI["Φ(s): D/A/U/O + flows + compound"] --> VA{V_actual relaxed_veto?}
     VA -->|触发| M1[malware · verdict_source=relaxed_veto]
     VA -->|否| VD{V_decl 无条件有害命中?<br/>U1-U8}
     VD -->|命中| M2[malware · verdict_source=vdecl<br/>不看 Judge]
@@ -139,11 +139,11 @@ flowchart TD
 ```mermaid
 flowchart TD
     B[触发条件块] --> V{Phase 3}
-    subgraph V[恶意审计]
+    subgraph P3BOX[恶意审计]
       V1[V_decl 块级分类<br/>kind + 2×2 + capabilities<br/>+ core_instruction]
       U1[U1-U8 无条件有害模式<br/>凭证外泄/反向shell/dropper/<br/>配置投毒/范围蔓延/指令窃取/勒索/指令级]
       V2[V_actual<br/>rule_engine 15规则 A-H + relaxed_veto]
-      V3[LLM Judge<br/>Φ(s) + V_decl 命中 + 原文]
+      V3["LLM Judge<br/>Φ(s) + V_decl 命中 + 原文"]
     end
     V1 --> U1
     U1 -->|命中| HIT[无条件有害]
