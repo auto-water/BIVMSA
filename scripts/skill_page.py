@@ -256,7 +256,8 @@ def load_real_annotations(result_file: Path) -> dict:
 
 
 def _build_page(name: str, items: list, verdict: str, quadrant: str,
-                mode: str, d_caps: list, a_caps: list, intended: str) -> str:
+                mode: str, d_caps: list, a_caps: list, intended: str,
+                skill_dir: str = "") -> str:
     # items: [{text, kind, cls, flow}]
     # Skill 描述能力空间：D/A 标签 + intended workflow
     _tags = lambda caps, extra: ("".join(
@@ -275,6 +276,16 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
         '</div>'
     )
 
+    def _rel_path(f):
+        """flow-item 文件路径相对化到 skill 根目录（如 scripts/generateContent.js）。"""
+        if not f:
+            return '?'
+        try:
+            rel = Path(str(f)).resolve().relative_to(Path(skill_dir).resolve())
+            return str(rel).replace("\\", "/")
+        except (ValueError, OSError):
+            return Path(str(f)).name
+
     def _chain_html(it):
         """恶意调用链：User → 构造输入 → 恶意块 → 外部关联代码(flow-item)。"""
         flow = it.get("flow") or {}
@@ -284,16 +295,17 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
         bid = flow.get("block_id") or "?"
         nodes = ['<div class="chain-node chain-user">User</div>',
                  '<div class="chain-arrow">→</div>',
-                 f'<div class="chain-input" title="可能触发该块调用的用户输入">{html_escape(user_input)}</div>',
+                 f'<div class="chain-input">{html_escape(user_input)}</div>',
                  '<div class="chain-arrow">→</div>',
                  f'<div class="chain-node chain-block">恶意块 #{bid}</div>']
         for fi in flow_items:
-            code = html_escape(str((fi.get("code") or "")[:80]))
-            loc = f'{fi.get("file","?")}:{fi.get("line_start","?")}'
+            loc = f'{_rel_path(fi.get("file"))}:{fi.get("line_start","?")}'
             cap = html_escape(fi.get("capability") or "")
+            code = html_escape(str(fi.get("code") or ""))
             nodes += ['<div class="chain-arrow">→</div>',
-                      f'<div class="chain-node chain-code"><b>{cap}</b> · {html_escape(loc)}'
-                      f'<br><code>{code}</code></div>']
+                      f'<div class="chain-node chain-code"><b>{cap}</b>'
+                      f'<span class="loc">{html_escape(loc)}</span>'
+                      f'<code>{code}</code></div>']
         return f'<div class="attack-chain">{"".join(nodes)}</div>'
 
     rows_html = []
@@ -380,14 +392,16 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   /* modal 2x2 六色 badge */
   .cls-badge {{ display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; color: #333; border: 1px solid rgba(0,0,0,.12); }}
   /* 恶意调用链：User → 构造输入 → 恶意块 → flow-item */
-  .attack-chain {{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 6px 10px 12px 10px; padding: 8px 10px; background: #fff8f8; border: 1px solid #f0c8c8; border-radius: 8px; font-size: 12px; }}
-  .chain-node {{ padding: 4px 10px; border-radius: 6px; font-family: Consolas, "Courier New", monospace; }}
-  .chain-user {{ background: #333; color: #fff; font-weight: 700; }}
-  .chain-block {{ background: #ffe0d6; color: #c0392b; font-weight: 700; border: 1px solid #f0b4a4; }}
+  .attack-chain {{ display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px; margin: 6px 10px 12px 10px; padding: 8px 10px; background: #fff8f8; border: 1px solid #f0c8c8; border-radius: 8px; font-size: 12px; }}
+  .chain-node {{ padding: 4px 8px; border-radius: 6px; font-family: Consolas, "Courier New", monospace; max-width: 220px; overflow: hidden; }}
+  .chain-user {{ background: #333; color: #fff; font-weight: 700; flex-shrink: 0; }}
+  .chain-block {{ background: #ffe0d6; color: #c0392b; font-weight: 700; border: 1px solid #f0b4a4; flex-shrink: 0; }}
   .chain-code {{ background: #f6f8fa; border: 1px solid #ddd; color: #333; }}
-  .chain-code code {{ font-size: 11px; color: #555; }}
-  .chain-input {{ background: #fff3cd; border: 1px dashed #e0c060; padding: 4px 8px; border-radius: 6px; color: #7a5c00; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  .chain-arrow {{ color: #999; font-weight: 700; }}
+  .chain-code b {{ display: block; font-size: 11px; margin-bottom: 2px; }}
+  .chain-code .loc {{ display: block; font-size: 11px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }}
+  .chain-code code {{ display: block; font-size: 11px; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }}
+  .chain-input {{ background: #fff3cd; border: 1px dashed #e0c060; padding: 4px 8px; border-radius: 6px; color: #7a5c00; max-width: 260px; font-size: 11px; line-height: 1.4; word-break: break-word; }}
+  .chain-arrow {{ color: #999; font-weight: 700; align-self: center; flex-shrink: 0; }}
   #close {{ float: right; cursor: pointer; border: none; background: none; font-size: 20px; color: #999; }}
 </style>
 </head>
@@ -525,7 +539,8 @@ def main() -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     out = target_dir / f"{skill_dir.name}_page.html"
     out.write_text(_build_page(name, items, verdict, quadrant, mode,
-                               d_caps, a_caps, intended), encoding="utf-8")
+                               d_caps, a_caps, intended,
+                               skill_dir=str(skill_dir)), encoding="utf-8")
     _emit(f"[page] {out}  ({len(items)} rows)  verdict={verdict}  {mode}")
 
 
