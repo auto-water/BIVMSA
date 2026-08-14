@@ -278,12 +278,12 @@ The output is a single JSON object. Output ONLY that JSON object.`,
           schema: {
             type: 'object',
             properties: {
-              instruction_capabilities: {
+              actual_capabilities: {
                 type: 'array',
                 items: {
                   type: 'object',
                   properties: {
-                    capability: { type: 'string', enum: ['instr-override', 'instr-conceal', 'instr-identity-hijack', 'instr-silent-exec', 'instr-exfil-instruction'] },
+                    capability: { type: 'string' },
                     evidence: { type: 'string' },
                     evidence_location: { type: 'string' },
                     is_adversarial: { type: 'boolean' },
@@ -293,18 +293,20 @@ The output is a single JSON object. Output ONLY that JSON object.`,
               },
               analysis_summary: { type: 'string' },
             },
-            required: ['instruction_capabilities', 'analysis_summary'],
+            required: ['actual_capabilities', 'analysis_summary'],
           },
         }
       ),
     ]);
 
     const dCaps = (dLlmResult?.declared_capabilities || []).map(c => c.capability);
-    const instrCaps = (aLlmInstrResult?.instruction_capabilities || [])
+    // A_llm：真实执行的所有敏感操作（A 的定义），is_adversarial 仅标注，不用于过滤
+    const aActualCaps = (aLlmInstrResult?.actual_capabilities || []).map(c => c.capability);
+    const aAdvCaps = (aLlmInstrResult?.actual_capabilities || [])
       .filter(c => c.is_adversarial)
       .map(c => c.capability);
 
-    log(`[${caseName}] D_llm: ${dCaps.length} declared, A_llm_instr: ${instrCaps.length} hidden instruction`);
+    log(`[${caseName}] D_llm: ${dCaps.length} declared, A_llm: ${aActualCaps.length} actual (${aAdvCaps.length} adversarial)`);
 
     // --- Step 4: LLM Judge — final verdict ---
     log(`[${caseName}] Running LLM Judge...`);
@@ -313,7 +315,7 @@ The output is a single JSON object. Output ONLY that JSON object.`,
       .map(c => `- ${c.capability}: "${c.evidence.substring(0, 100)}"`)
       .join('\n') || '(none)';
 
-    const instructionSummary = (aLlmInstrResult?.instruction_capabilities || [])
+    const instructionSummary = (aLlmInstrResult?.actual_capabilities || [])
       .map(c => `- ${c.capability} (adversarial=${c.is_adversarial}): "${c.evidence.substring(0, 100)}"`)
       .join('\n') || '(none)';
 
@@ -399,7 +401,12 @@ Return ONLY a JSON object:
 
     const vdeclVars = {
       D: detEvidence?.D_det || [],
-      A: Array.from(new Set([...(detEvidence?.A_ast || []), ...(detEvidence?.A_regex || [])])),
+      // A = 真实执行的所有敏感操作：确定性(A_ast+A_regex) ∪ A_llm（完整能力）
+      A: Array.from(new Set([
+        ...(detEvidence?.A_ast || []),
+        ...(detEvidence?.A_regex || []),
+        ...aActualCaps,
+      ])),
       U: detEvidence?.undeclared || [],
       O: detEvidence?.overdeclared || [],
     };
@@ -569,8 +576,10 @@ VARS_JSON`,
       key_evidence: judgeResult?.key_evidence || [],
       d_llm_count: dCaps.length,
       d_llm_caps: dCaps,
-      a_llm_instr_count: instrCaps.length,
-      a_llm_instr_caps: instrCaps,
+      // A_llm: 真实执行的所有敏感操作（完整能力，非仅恶意指令）
+      a_llm_instr_count: aActualCaps.length,
+      a_llm_instr_caps: aActualCaps,
+      a_llm_adv_caps: aAdvCaps,
       intended_workflow: dLlmResult?.intended_workflow || '',
       // Deterministic evidence passed through for downstream aggregation
       det: detEvidence

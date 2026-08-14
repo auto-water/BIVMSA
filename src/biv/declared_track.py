@@ -1,6 +1,12 @@
 """
 Module 1: Declared Track — extract D(s) (declared capabilities) from SKILL.md.
 
+Definitions (user-confirmed):
+- D(s) = ALL sensitive operations the skill DESCRIBES/CONTAINS in its text
+  (frontmatter + body declarations), whether or not it really executes them.
+- A(s) = ALL sensitive operations the skill REALLY EXECUTES when it runs
+  (covered by actual_track: A_ast + A_regex + A_llm).
+
 D(s) = D_deterministic(s) ∪ D_llm(s)
 
 - D_deterministic: parse YAML frontmatter, map allowed-tools → taxonomy

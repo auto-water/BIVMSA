@@ -190,12 +190,12 @@ const aLlmInstrResult = await agent(
     schema: {
       type: 'object',
       properties: {
-        instruction_capabilities: {
+        actual_capabilities: {
           type: 'array',
           items: {
             type: 'object',
             properties: {
-              capability: { type: 'string', enum: ['instr-override', 'instr-conceal', 'instr-identity-hijack', 'instr-silent-exec', 'instr-exfil-instruction'] },
+              capability: { type: 'string' },
               evidence: { type: 'string' },
               evidence_location: { type: 'string' },
               is_adversarial: { type: 'boolean' },
@@ -205,13 +205,13 @@ const aLlmInstrResult = await agent(
         },
         analysis_summary: { type: 'string' },
       },
-      required: ['instruction_capabilities', 'analysis_summary'],
+      required: ['actual_capabilities', 'analysis_summary'],
     },
   }
 );
 
 log(`D_llm extracted: ${dLlmResult?.declared_capabilities?.length || 0} declared capabilities`);
-log(`A_llm_instr extracted: ${aLlmInstrResult?.instruction_capabilities?.length || 0} instruction-level capabilities`);
+log(`A_llm extracted: ${aLlmInstrResult?.actual_capabilities?.length || 0} actual capabilities`);
 
 // ---------------------------------------------------------------------------
 // Phase 2: Deviation Detection (computed by Python pipeline, already in detEvidence)
@@ -301,9 +301,14 @@ log(`Phase 0 blocks: ${blocks.length}`);
 log('Running V_decl block-level classification...');
 
 // Render sentence_classifier prompt (blocks from Phase 0; D/A/U/O via stdin)
+// A = 真实执行的所有敏感操作：确定性(A_ast+A_regex) ∪ A_llm（完整能力）
 const vdeclVars = {
   D: detEvidence?.D_det || [],
-  A: Array.from(new Set([...(detEvidence?.A_ast || []), ...(detEvidence?.A_regex || [])])),
+  A: Array.from(new Set([
+    ...(detEvidence?.A_ast || []),
+    ...(detEvidence?.A_regex || []),
+    ...(aLlmInstrResult?.actual_capabilities || []).map(c => c.capability),
+  ])),
   U: detEvidence?.undeclared || [],
   O: detEvidence?.overdeclared || [],
 };
@@ -423,7 +428,7 @@ ${buildDetEvidenceText(detEvidence)}
 ${(dLlmResult?.declared_capabilities || []).map(c => `- ${c.capability}: "${c.evidence.substring(0, 100)}"`).join('\n') || '(none)'}
 
 ## Instruction-Level Analysis
-${(aLlmInstrResult?.instruction_capabilities || []).map(c => `- ${c.capability} (adversarial: ${c.is_adversarial}): "${c.evidence.substring(0, 100)}"`).join('\n') || '(none)'}
+${(aLlmInstrResult?.actual_capabilities || []).map(c => `- ${c.capability} (adversarial: ${c.is_adversarial}): "${c.evidence.substring(0, 100)}"`).join('\n') || '(none)'}
 
 ## Analysis Summary
 ${aLlmInstrResult?.analysis_summary || 'No instruction-level threats detected.'}
@@ -488,7 +493,7 @@ const finalResult = {
   verdict_source: vdeclFired ? 'vdecl' : 'llm_judge',
   verdict_reasoning: judgeResult?.reasoning || '',
   declared_capabilities: dLlmResult?.declared_capabilities || [],
-  instruction_capabilities: aLlmInstrResult?.instruction_capabilities || [],
+  actual_capabilities: aLlmInstrResult?.actual_capabilities || [],
   intended_workflow: dLlmResult?.intended_workflow || '',
   judge_intent_category: judgeResult?.intent_category || 'H',
   judge_intent_category_name: INTENT_NAMES[judgeResult?.intent_category] || '',

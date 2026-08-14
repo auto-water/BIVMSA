@@ -185,7 +185,9 @@ def load_real_annotations(result_file: Path) -> dict:
         for loc in (entry.get("locations") or []):
             cce_lookup.setdefault(cap, []).append(loc)
 
-    # Skill 描述能力空间：D（声明）与 A（实际）能力集合 + intended workflow
+    # Skill 描述能力空间：
+    #   D = skill 描述包含的所有敏感操作（D_llm 语义 ∪ D_deterministic）
+    #   A = skill 真实执行的所有敏感操作（A_ast ∪ A_regex ∪ A_llm 完整能力）
     d_caps = sorted(set((d.get("d_llm_caps") or []) + (p1.get("D_deterministic") or [])))
     a_caps = sorted(set((p1.get("A_ast") or []) + (p1.get("A_regex") or []) + (d.get("a_llm_instr_caps") or [])))
     intended = d.get("intended_workflow") or ""
