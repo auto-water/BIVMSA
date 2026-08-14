@@ -407,7 +407,7 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   .attack-graph {{ position: relative; margin: 8px 10px 12px 10px; background: #fbfbfd; border: 1px solid #e3e3ea; border-radius: 10px; overflow-x: auto; overflow-y: hidden; }}
   .ag-edges {{ position: absolute; inset: 0; pointer-events: none; }}
   .ag-node {{ position: absolute; transform: translate(-50%, -50%); width: 170px; max-height: 200px; border-radius: 10px; padding: 6px 10px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,.08); border: 1px solid; box-sizing: border-box; display: flex; flex-direction: column; }}
-  .ag-user {{ background: #2f3542; color: #fff; border-color: #2f3542; text-align: center; width: auto; padding: 8px 18px; font-weight: 700; border-radius: 20px; }}
+  .ag-user {{ background: #2f3542; color: #fff; border-color: #2f3542; text-align: center; font-weight: 700; border-radius: 20px; }}
   .ag-input {{ background: #fff8e1; border-color: #f0d97a; color: #6d5a00; max-width: 260px; }}
   .ag-block {{ background: #ffebe6; border-color: #f2b8a8; color: #c0392b; font-weight: 700; }}
   .ag-code {{ background: #fff; border-color: #d8d8e0; }}
@@ -437,7 +437,9 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
     svg.setAttribute('width', W);
     svg.setAttribute('height', H);
     const pos = {{}};
-    nodes.forEach((n, i) => {{ pos[n.id] = {{ x: 20 + i * COL_W, y: H / 2 }}; }});
+    // 首列中心偏移 COL_W/2，保证节点左边缘不被容器裁切；所有节点统一宽（170），
+    // 边起点用 x+85（半宽）即可紧贴节点右边缘。
+    nodes.forEach((n, i) => {{ pos[n.id] = {{ x: COL_W / 2 + i * COL_W, y: H / 2 }}; }});
     let paths = '<defs><marker id="ag-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa0a6"/></marker></defs>';
     edges.forEach(([a, b]) => {{
       const pa = pos[a], pb = pos[b];
