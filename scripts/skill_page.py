@@ -330,13 +330,15 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
     rows_html = []
     for i, it in enumerate(items):
         kind = it["kind"]
-        # 触发条件分组标题（非 frontmatter 块，且块携带 trigger_condition）
+        # 触发条件分组标题（块携带 trigger_condition；frontmatter 也用元数据标题）
         trig = (it.get("flow") or {}).get("trigger_condition") or ""
         bkind = (it.get("flow") or {}).get("block_kind") or ""
-        if trig and bkind != "frontmatter":
+        is_fm = kind == "frontmatter" or bkind == "frontmatter"
+        if trig:
             bid = (it.get("flow") or {}).get("block_id")
+            icon = "📦" if is_fm else "⚡"
             rows_html.append(
-                f'<div class="trigger-head"><span class="th-icon">⚡</span>'
+                f'<div class="trigger-head"><span class="th-icon">{icon}</span>'
                 f'{html_escape(trig)} <span class="th-id">block {bid}</span></div>'
             )
         if kind == "frontmatter":
