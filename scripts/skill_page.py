@@ -407,17 +407,18 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   /* modal 2x2 六色 badge */
   .cls-badge {{ display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; color: #333; border: 1px solid rgba(0,0,0,.12); }}
   /* 恶意调用链 DAG 图（Cytoscape.js + Dagre 风格，手写原生） */
-  .attack-graph {{ position: relative; margin: 8px 10px 12px 10px; background: #fbfbfd; border: 1px solid #e3e3ea; border-radius: 10px; overflow: hidden; }}
+  .attack-graph {{ position: relative; margin: 8px 10px 12px 10px; background: #fbfbfd; border: 1px solid #e3e3ea; border-radius: 10px; overflow-x: auto; overflow-y: hidden; }}
   .ag-edges {{ position: absolute; inset: 0; pointer-events: none; }}
-  .ag-node {{ position: absolute; transform: translate(-50%, -50%); width: 170px; border-radius: 10px; padding: 6px 10px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,.08); border: 1px solid; box-sizing: border-box; }}
+  .ag-node {{ position: absolute; transform: translate(-50%, -50%); width: 170px; max-height: 200px; border-radius: 10px; padding: 6px 10px; font-size: 11px; box-shadow: 0 2px 6px rgba(0,0,0,.08); border: 1px solid; box-sizing: border-box; display: flex; flex-direction: column; }}
   .ag-user {{ background: #2f3542; color: #fff; border-color: #2f3542; text-align: center; width: auto; padding: 8px 18px; font-weight: 700; border-radius: 20px; }}
-  .ag-input {{ background: #fff8e1; border-color: #f0d97a; color: #6d5a00; max-width: 250px; }}
+  .ag-input {{ background: #fff8e1; border-color: #f0d97a; color: #6d5a00; max-width: 260px; }}
   .ag-block {{ background: #ffebe6; border-color: #f2b8a8; color: #c0392b; font-weight: 700; }}
   .ag-code {{ background: #fff; border-color: #d8d8e0; }}
-  .ag-title {{ font-weight: 700; font-size: 11px; margin-bottom: 2px; }}
-  .ag-text {{ font-size: 11px; line-height: 1.4; word-break: break-word; max-height: 52px; overflow: hidden; }}
-  .ag-code .ag-text {{ font-family: Consolas, "Courier New", monospace; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  .ag-code .ag-code-text {{ font-family: Consolas, "Courier New", monospace; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }}
+  .ag-title {{ font-weight: 700; font-size: 11px; margin-bottom: 2px; flex-shrink: 0; }}
+  /* 节点内文本：完整显示 + 超限滚动（纵向）；不再截断 */
+  .ag-text {{ font-size: 11px; line-height: 1.4; word-break: break-word; white-space: normal; max-height: 88px; overflow-y: auto; }}
+  .ag-code .ag-text {{ font-family: Consolas, "Courier New", monospace; color: #777; max-height: 44px; }}
+  .ag-code-text {{ font-family: Consolas, "Courier New", monospace; color: #555; max-height: 88px; overflow: auto; word-break: break-all; display: block; margin-top: 2px; }}
   #close {{ float: right; cursor: pointer; border: none; background: none; font-size: 20px; color: #999; }}
 </style>
 <script>
@@ -429,7 +430,7 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   function renderGraph(gid, nodes, edges) {{
     const el = document.getElementById(gid);
     if (!el) return;
-    const COL_W = 220, H = 150;
+    const COL_W = 220, H = 230;
     const W = Math.max(300, nodes.length * COL_W + 40);
     el.style.width = W + 'px';
     el.style.height = H + 'px';
