@@ -230,6 +230,10 @@ def load_real_annotations(result_file: Path) -> dict:
                 item["flow"]["block_kind"] = b.get("kind", "")
                 item["flow"]["trigger_condition"] = b.get("trigger_condition", "")
                 item["flow"]["attack_chain"] = attack_by_id.get(bid)
+                # frontmatter 块强制灰色：vdecl 会把它标成 kind=non_action，
+                # 这里按 phase0 的块类型覆盖，避免元数据块被当成普通内容着色。
+                if b.get("kind") == "frontmatter":
+                    item["kind"] = "frontmatter"
                 sentences.append(item)
         mode = "真实标注（按块）" if classifications else "待分类（无块级标注）"
     else:
