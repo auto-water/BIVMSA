@@ -599,10 +599,12 @@ VARS_JSON`,
         for (const cap of capsOfBlock) {
           if (cce[cap]) cceFiltered[cap] = cce[cap];
         }
+        // trigger_condition 从 Phase 0 blocks 关联（block_classification 无此字段）
+        const mbTrigger = (blocks.find(b => b.block_id === mb.block_id) || {}).trigger_condition || '';
         const chainVars = {
           block: {
             block_id: mb.block_id,
-            trigger_condition: mb.trigger_condition || '',
+            trigger_condition: mbTrigger || mb.trigger_condition || '',
             classification: mb.classification || '',
             capabilities: capsOfBlock,
             text: (mb.text || '').slice(0, 600),
