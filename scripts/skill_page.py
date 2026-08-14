@@ -473,7 +473,6 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   <h1>{html_escape(name)}</h1>
   <div class="meta">
     <span class="badge {'malware' if verdict == 'malware' else 'benign'}">{html_escape(verdict)}</span>
-    quadrant: {html_escape(quadrant)} · 动作指令加粗 + ▶ 可点击查看执行流 · <b>{mode}</b>
   </div>
   <div class="legend">{legend}</div>
   {capspace}
