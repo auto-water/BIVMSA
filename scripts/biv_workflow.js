@@ -140,17 +140,15 @@ const bodyContent = (parsedSkill && parsedSkill.body) || '';
 // Step 1b: Parallel LLM extraction
 log('Running LLM capability extraction (declared track + instruction analysis)...');
 
-// Render LLM prompts from the single Python authority (src/biv/prompts.py).
-const llmPrompts = parseJsonOutput(await agent(
-  `Run this shell command and return its EXACT raw stdout JSON (a map of template name -> rendered prompt text), with NO commentary, NO markdown code fences:
+// Render D_llm prompt (single template → plain rendered prompt text).
+const dLlmPrompt = await agent(
+  `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
 
-python scripts/prompt_render.py --multi d_llm_extract,a_llm_instr --skill-dir ${skillDir} --variant single
+python scripts/prompt_render.py d_llm_extract --skill-dir ${skillDir} --variant single
 
-The output is a single JSON object. Output ONLY that JSON object.`,
-  { label: 'render-llm-prompts' }
-));
-const dLlmPrompt = (llmPrompts && llmPrompts.d_llm_extract) || '';
-const aLlmInstrPrompt = (llmPrompts && llmPrompts.a_llm_instr) || '';
+Return ONLY the rendered prompt text.`,
+  { label: 'render-dllm-prompt' }
+);
 
 // D_llm: Extract declared capabilities from natural language
 const dLlmResult = await agent(
@@ -181,7 +179,18 @@ const dLlmResult = await agent(
   }
 );
 
-// A_llm_instr: Extract instruction-level capabilities
+// A_llm: Extract actual capabilities AND judge coverage by declared intent (D).
+// Runs after D_llm because covered_by_declared needs the declared intent.
+const aLlmInstrPrompt = await agent(
+  `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py a_llm_instr --skill-dir ${skillDir} --variant single <<'VARS_JSON'
+${JSON.stringify({ declared_caps: (dLlmResult?.declared_capabilities || []).map(c => c.capability), intended_workflow: dLlmResult?.intended_workflow || '' })}
+VARS_JSON
+
+Return ONLY the rendered prompt text.`,
+  { label: 'render-allm-prompt' }
+);
 const aLlmInstrResult = await agent(
   aLlmInstrPrompt,
   {
@@ -199,8 +208,9 @@ const aLlmInstrResult = await agent(
               evidence: { type: 'string' },
               evidence_location: { type: 'string' },
               is_adversarial: { type: 'boolean' },
+              covered_by_declared: { type: 'boolean' },
             },
-            required: ['capability', 'evidence', 'evidence_location', 'is_adversarial'],
+            required: ['capability', 'evidence', 'evidence_location', 'is_adversarial', 'covered_by_declared'],
           },
         },
         analysis_summary: { type: 'string' },
@@ -301,15 +311,22 @@ log(`Phase 0 blocks: ${blocks.length}`);
 log('Running V_decl block-level classification...');
 
 // Render sentence_classifier prompt (blocks from Phase 0; D/A/U/O via stdin)
+// D = 声明能力全集（确定性 ∪ D_llm 语义）
 // A = 真实执行的所有敏感操作：确定性(A_ast+A_regex) ∪ A_llm（完整能力）
+// U = 超出声明意图（covered_by_declared=false）的操作 → 语义偏差，非集合差
 const vdeclVars = {
-  D: detEvidence?.D_det || [],
+  D: Array.from(new Set([
+    ...(detEvidence?.D_det || []),
+    ...(dLlmResult?.declared_capabilities || []).map(c => c.capability),
+  ])),
   A: Array.from(new Set([
     ...(detEvidence?.A_ast || []),
     ...(detEvidence?.A_regex || []),
     ...(aLlmInstrResult?.actual_capabilities || []).map(c => c.capability),
   ])),
-  U: detEvidence?.undeclared || [],
+  U: (aLlmInstrResult?.actual_capabilities || [])
+    .filter(c => c.covered_by_declared === false)
+    .map(c => c.capability),
   O: detEvidence?.overdeclared || [],
 };
 
@@ -494,6 +511,8 @@ const finalResult = {
   verdict_reasoning: judgeResult?.reasoning || '',
   declared_capabilities: dLlmResult?.declared_capabilities || [],
   actual_capabilities: aLlmInstrResult?.actual_capabilities || [],
+  a_llm_instr_caps: (aLlmInstrResult?.actual_capabilities || []).map(c => c.capability),
+  a_llm_adv_caps: (aLlmInstrResult?.actual_capabilities || []).filter(c => c.is_adversarial).map(c => c.capability),
   intended_workflow: dLlmResult?.intended_workflow || '',
   judge_intent_category: judgeResult?.intent_category || 'H',
   judge_intent_category_name: INTENT_NAMES[judgeResult?.intent_category] || '',

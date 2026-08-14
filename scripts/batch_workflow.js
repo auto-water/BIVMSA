@@ -228,85 +228,102 @@ The output is a single JSON object. Output ONLY that JSON object.`,
     // --- Step 3: Parallel LLM extraction ---
     log(`[${caseName}] Running LLM extraction...`);
 
-    // Render LLM prompts from the single Python authority (src/biv/prompts.py).
-    const llmPrompts = parseJsonOutput(await agent(
-      `Run this shell command and return its EXACT raw stdout JSON (a map of template name -> rendered prompt text), with NO commentary, NO markdown code fences:
+    // Render D_llm prompt (single template → plain rendered prompt text).
+    const dLlmPrompt = await agent(
+      `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
 
-python scripts/prompt_render.py --multi d_llm_extract,a_llm_instr --skill-dir ${caseDir} --variant batch
+python scripts/prompt_render.py d_llm_extract --skill-dir ${caseDir} --variant batch
 
-The output is a single JSON object. Output ONLY that JSON object.`,
-      { label: `render-llm-prompts-${caseName}` }
-    ));
-    const dLlmPrompt = (llmPrompts && llmPrompts.d_llm_extract) || '';
-    const aLlmInstrPrompt = (llmPrompts && llmPrompts.a_llm_instr) || '';
+Return ONLY the rendered prompt text.`,
+      { label: `render-dllm-prompt-${caseName}` }
+    );
 
-    // D_llm: Semantic declared capability extraction
-    const [dLlmResult, aLlmInstrResult] = await Promise.all([
-      agent(
-        dLlmPrompt,
-        {
-          label: `d_llm-${caseName}`,
-          phase: 'Audit',
-          schema: {
-            type: 'object',
-            properties: {
-              declared_capabilities: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    capability: { type: 'string' },
-                    evidence: { type: 'string' },
-                    evidence_location: { type: 'string' },
-                  },
-                  required: ['capability', 'evidence', 'evidence_location'],
+    // D_llm: Semantic declared capability extraction (runs FIRST; A_llm needs its intent).
+    const dLlmResult = await agent(
+      dLlmPrompt,
+      {
+        label: `d_llm-${caseName}`,
+        phase: 'Audit',
+        schema: {
+          type: 'object',
+          properties: {
+            declared_capabilities: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  capability: { type: 'string' },
+                  evidence: { type: 'string' },
+                  evidence_location: { type: 'string' },
                 },
+                required: ['capability', 'evidence', 'evidence_location'],
               },
-              intended_workflow: { type: 'string' },
-              expected_data_lineages: { type: 'string' },
             },
-            required: ['declared_capabilities', 'intended_workflow', 'expected_data_lineages'],
+            intended_workflow: { type: 'string' },
+            expected_data_lineages: { type: 'string' },
           },
-        }
-      ),
-
-      agent(
-        aLlmInstrPrompt,
-        {
-          label: `a_llm_instr-${caseName}`,
-          phase: 'Audit',
-          schema: {
-            type: 'object',
-            properties: {
-              actual_capabilities: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    capability: { type: 'string' },
-                    evidence: { type: 'string' },
-                    evidence_location: { type: 'string' },
-                    is_adversarial: { type: 'boolean' },
-                  },
-                  required: ['capability', 'evidence', 'evidence_location', 'is_adversarial'],
-                },
-              },
-              analysis_summary: { type: 'string' },
-            },
-            required: ['actual_capabilities', 'analysis_summary'],
-          },
-        }
-      ),
-    ]);
-
+          required: ['declared_capabilities', 'intended_workflow', 'expected_data_lineages'],
+        },
+      }
+    );
     const dCaps = (dLlmResult?.declared_capabilities || []).map(c => c.capability);
-    // A_llm：真实执行的所有敏感操作（A 的定义），is_adversarial 仅标注，不用于过滤
+
+    // A_llm: extract actual capabilities AND judge coverage by declared intent (D).
+    // Runs AFTER D_llm — covered_by_declared needs the declared intent.
+    const aLlmVars = {
+      declared_caps: dCaps,
+      intended_workflow: dLlmResult?.intended_workflow || '',
+    };
+    const aLlmInstrPrompt = await agent(
+      `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py a_llm_instr --skill-dir ${caseDir} --variant batch <<'VARS_JSON'
+${JSON.stringify(aLlmVars)}
+VARS_JSON
+
+Return ONLY the rendered prompt text.`,
+      { label: `render-allm-prompt-${caseName}` }
+    );
+    const aLlmInstrResult = await agent(
+      aLlmInstrPrompt,
+      {
+        label: `a_llm_instr-${caseName}`,
+        phase: 'Audit',
+        schema: {
+          type: 'object',
+          properties: {
+            actual_capabilities: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  capability: { type: 'string' },
+                  evidence: { type: 'string' },
+                  evidence_location: { type: 'string' },
+                  is_adversarial: { type: 'boolean' },
+                  covered_by_declared: { type: 'boolean' },
+                },
+                required: ['capability', 'evidence', 'evidence_location', 'is_adversarial', 'covered_by_declared'],
+              },
+            },
+            analysis_summary: { type: 'string' },
+          },
+          required: ['actual_capabilities', 'analysis_summary'],
+        },
+      }
+    );
+
+    // A_llm：真实执行的所有敏感操作（完整 A）
     const aActualCaps = (aLlmInstrResult?.actual_capabilities || []).map(c => c.capability);
     const aAdvCaps = (aLlmInstrResult?.actual_capabilities || [])
       .filter(c => c.is_adversarial)
       .map(c => c.capability);
+    // U 语义化：仅超出声明意图（covered_by_declared=false）的操作才是真偏差
+    const aUncoveredCaps = (aLlmInstrResult?.actual_capabilities || [])
+      .filter(c => c.covered_by_declared === false)
+      .map(c => c.capability);
 
-    log(`[${caseName}] D_llm: ${dCaps.length} declared, A_llm: ${aActualCaps.length} actual (${aAdvCaps.length} adversarial)`);
+    log(`[${caseName}] D_llm: ${dCaps.length} declared, A_llm: ${aActualCaps.length} actual (${aAdvCaps.length} adv, ${aUncoveredCaps.length} over-intent)`);
 
     // --- Step 4: LLM Judge — final verdict ---
     log(`[${caseName}] Running LLM Judge...`);
@@ -400,14 +417,16 @@ Return ONLY a JSON object:
     log(`[${caseName}] Running V_decl block-level classification...`);
 
     const vdeclVars = {
-      D: detEvidence?.D_det || [],
+      // D = 声明能力全集（确定性 ∪ D_llm 语义）
+      D: Array.from(new Set([...(detEvidence?.D_det || []), ...dCaps])),
       // A = 真实执行的所有敏感操作：确定性(A_ast+A_regex) ∪ A_llm（完整能力）
       A: Array.from(new Set([
         ...(detEvidence?.A_ast || []),
         ...(detEvidence?.A_regex || []),
         ...aActualCaps,
       ])),
-      U: detEvidence?.undeclared || [],
+      // U = 超出声明意图（covered_by_declared=false）的操作 → 语义偏差，非集合差
+      U: aUncoveredCaps,
       O: detEvidence?.overdeclared || [],
     };
 

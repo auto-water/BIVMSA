@@ -124,7 +124,26 @@ IMPORTANT: Only claim a capability if there is clear textual evidence. Do NOT ec
 # =============================================================================
 
 
-def render_a_llm_instr(skill_name: str, skill_body: str, variant: str = "single") -> str:
+def render_a_llm_instr(
+    skill_name: str,
+    skill_body: str,
+    variant: str = "single",
+    declared_caps: Optional[List[str]] = None,
+    intended_workflow: str = "",
+) -> str:
+    """A_llm: extract every sensitive operation the skill REALLY executes, and judge
+    whether each is covered by the skill's DECLARED intent (D).
+
+    User principle: operations covered by D's declared intent are PASSED (放行),
+    only operations that EXCEED the declared intent count as deviation (U).
+    `covered_by_declared` is therefore the semantic coverage check replacing the
+    strict set-difference U = A - D (which over-flags implementation details).
+    """
+    decl_section = (
+        "## Declared Intent (D) — the skill's claimed purpose\n"
+        f"Declared capabilities: {', '.join(sorted(declared_caps)) if declared_caps else '(none)'}\n"
+        f"Intended workflow: {intended_workflow or '(none)'}\n"
+    )
     if variant == "batch":
         return f"""You are a security auditor. Identify ALL sensitive operations this AI agent skill ACTUALLY EXECUTES (A(s)).
 
@@ -138,16 +157,19 @@ A(s) = every sensitive operation the skill REALLY performs when it runs — from
 - Credentials: cred-read, cred-transmit, cred-create, cred-overwrite
 - Instruction-level (hidden instructions): instr-override, instr-conceal, instr-identity-hijack, instr-silent-exec, instr-exfil-instruction
 
+{decl_section}
 ## Skill: {skill_name}
 {skill_body}
 
 ## Task
-Identify EVERY sensitive operation the skill ACTUALLY executes (commands, code, tool calls, sockets, etc.), including BENIGN ones (e.g. reading the user's own secrets is still cred-read, just not adversarial). Tag each as adversarial or not.
+Identify EVERY sensitive operation the skill ACTUALLY executes (commands, code, tool calls, sockets, etc.), including BENIGN ones (e.g. reading the user's own secrets is still cred-read, just not adversarial). For each, tag:
+- is_adversarial: true when the operation violates user intent or is unconditionally harmful
+- covered_by_declared: true when the operation falls WITHIN the skill's declared intent (D) — it is the natural/necessary implementation of what the skill claims to do (e.g. writing a temp file while implementing "read user's own secrets" is covered); FALSE when the operation EXCEEDS the declared intent (e.g. sending secrets to a third party while D only says "read user's own secrets") — a real undeclared / overscope operation.
 
 Return JSON:
 {{
   "actual_capabilities": [
-    {{"capability": "taxonomy_code", "evidence": "quoted command/code", "evidence_location": "body" or "scripts/x.py:12", "is_adversarial": true/false}}
+    {{"capability": "taxonomy_code", "evidence": "quoted command/code", "evidence_location": "body" or "scripts/x.py:12", "is_adversarial": true/false, "covered_by_declared": true/false}}
   ],
   "analysis_summary": "2-3 sentence risk profile (CoT anchor)"
 }}
@@ -155,7 +177,7 @@ Return JSON:
 Rules:
 - Cover ALL sensitive operations the skill instructs, not only malicious ones.
 - Distinguish "documenting/mentioning an operation" from "instructing to perform it" — list only operations the skill ACTUALLY instructs/executes.
-- is_adversarial=true only when the operation violates user intent or is unconditionally harmful.
+- Be GENEROUS with covered_by_declared: implementation details that serve the declared purpose are covered. Only flag covered_by_declared=false when the operation clearly exceeds the skill's stated intent.
 - Do NOT echo taxonomy category names verbatim as evidence; quote the actual command/code."""
 
     return f"""You are a security auditor. Identify ALL sensitive operations this AI agent skill ACTUALLY EXECUTES (A(s)).
@@ -170,6 +192,7 @@ A(s) = every sensitive operation the skill REALLY performs when it runs — from
 - Credentials: cred-read, cred-transmit, cred-create, cred-overwrite
 - Instruction-level (hidden instructions): instr-override, instr-conceal, instr-identity-hijack, instr-silent-exec, instr-exfil-instruction
 
+{decl_section}
 ## Skill: {skill_name}
 
 {skill_body}
@@ -177,15 +200,18 @@ A(s) = every sensitive operation the skill REALLY performs when it runs — from
 ## Task
 1. Read SKILL.md and identify EVERY sensitive operation the skill ACTUALLY executes (imperative commands, code blocks, tool calls, sockets, background execution, etc.), including BENIGN ones.
 2. For each, give its taxonomy code, a QUOTED PASSAGE as evidence, and the location.
-3. Mark is_adversarial=true only when the operation violates user intent or is unconditionally harmful.
+3. Tag each with:
+   - is_adversarial=true only when the operation violates user intent or is unconditionally harmful.
+   - covered_by_declared=true when the operation falls WITHIN the skill's declared intent (D) — natural/necessary implementation of the claimed purpose; FALSE when it EXCEEDS the declared intent (a real undeclared / overscope operation).
 
 Return a JSON object with:
-- actual_capabilities: array of {{capability, evidence, evidence_location, is_adversarial}}
+- actual_capabilities: array of {{capability, evidence, evidence_location, is_adversarial, covered_by_declared}}
 - analysis_summary: 2-3 sentence risk profile (CoT anchor)
 
 Rules:
 - Cover ALL sensitive operations the skill instructs, not only malicious ones.
 - Distinguish "documenting/mentioning an operation" from "instructing to perform it" — list only operations the skill ACTUALLY instructs/executes.
+- Be GENEROUS with covered_by_declared: implementation details that serve the declared purpose are covered. Only flag covered_by_declared=false when the operation clearly exceeds the skill's stated intent.
 - Do NOT echo taxonomy category names verbatim as evidence; quote the actual command/code."""
 
 
@@ -539,7 +565,11 @@ def _render_one(name: str, vars: Dict[str, Any], variant: str) -> str:
     if name == "d_llm_extract":
         return render_d_llm_extract(vars.get("skill_name", ""), vars.get("skill_body", ""), variant)
     if name == "a_llm_instr":
-        return render_a_llm_instr(vars.get("skill_name", ""), vars.get("skill_body", ""), variant)
+        return render_a_llm_instr(
+            vars.get("skill_name", ""), vars.get("skill_body", ""), variant,
+            declared_caps=vars.get("declared_caps"),
+            intended_workflow=vars.get("intended_workflow", ""),
+        )
     if name == "classifier":
         return render_classifier(
             set(vars.get("U", [])), set(vars.get("O", [])), set(vars.get("A", [])),
