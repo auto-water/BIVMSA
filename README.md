@@ -72,6 +72,7 @@ MAS4MalSkill/
 ├── README.md                 # 本文档
 ├── requirements.txt          # Python 依赖 (核心)
 ├── docs/
+│   ├── system-spec.md        # 系统说明书 (设计思路/术语/技术栈/编排/数据模型/可视化)
 │   ├── skill-scanner/        # 旧版 scanner 参考文档
 │   ├── system-diagrams.md    # 系统示意图 (mermaid: 架构/时序/流程/各 Phase)
 │   ├── execution-plan.md     # 修改执行计划 (Phase 0-4 进度)
