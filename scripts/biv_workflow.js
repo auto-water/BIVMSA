@@ -430,6 +430,50 @@ if (chunks.length <= 1) {
   };
 }
 
+// --- coverage 校验：缺失块补测 ---
+// vdecl 可能漏标部分块（LLM 输出不完整）。对缺失 block_id 单独补测并合并。
+const _classifiedIds = new Set((vdeclResult?.block_classifications || []).map(c => c.block_id));
+const missingBlocks = blocks.filter(b => !_classifiedIds.has(b.block_id));
+if (missingBlocks.length > 0) {
+  log(`Phase 4/vdecl missing ${missingBlocks.length} block(s), backfilling...`);
+  const backfillResults = await Promise.all(missingBlocks.map(async (mb, idx) => {
+    const vars = { ...vdeclVars, blocks: [mb] };
+    const prompt = await agent(
+      `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py sentence_classifier --skill-dir ${skillDir} --variant single <<'VARS_JSON'
+${JSON.stringify(vars)}
+VARS_JSON
+
+Return ONLY the rendered prompt text.`,
+      { label: `render-vdecl-backfill-${idx}` }
+    );
+    return agent(
+      prompt,
+      { label: `vdecl_backfill-${idx}`, phase: 'Classify', schema: VDECL_SCHEMA }
+    );
+  }));
+  const bf = backfillResults.filter(Boolean);
+  const _byId = {};
+  for (const c of (vdeclResult?.block_classifications || [])) {
+    if (c && typeof c.block_id === 'number') _byId[c.block_id] = c;
+  }
+  for (const r of bf) {
+    for (const c of (r.block_classifications || [])) {
+      if (c && typeof c.block_id === 'number') _byId[c.block_id] = c;
+    }
+  }
+  const sorted = Object.keys(_byId).map(Number).sort((a, b) => a - b).map(k => _byId[k]);
+  const uncond = [...(vdeclResult?.unconditional_harmful || []),
+    ...bf.flatMap(r => r.unconditional_harmful || [])].filter(h => h && h.pattern);
+  vdeclResult = {
+    block_classifications: sorted,
+    unconditional_harmful: uncond,
+    coverage: { total_blocks: blocks.length, classified_blocks: sorted.length },
+  };
+  log(`vdecl backfilled: ${sorted.length}/${blocks.length} blocks`);
+}
+
 const vdeclHits = (vdeclResult?.unconditional_harmful || []).filter(h => h && h.pattern);
 const vdeclFired = vdeclHits.length > 0;
 const vdeclNoDevMal = (vdeclResult?.block_classifications || [])
