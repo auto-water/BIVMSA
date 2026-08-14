@@ -429,8 +429,10 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
     if (!el) return;
     const COL_W = 220, H = 230;
     const W = Math.max(300, nodes.length * COL_W + 40);
-    el.style.width = W + 'px';
+    // 容器宽度交给 CSS（撑满父容器、限宽）；SVG 内容宽 = W，超出时容器横向滚动。
+    // 不设置 el.style.width，避免把父卡片撑出横向滚动。
     el.style.height = H + 'px';
+    el.style.minWidth = '100%';
     const svg = el.querySelector('.ag-edges');
     svg.setAttribute('width', W);
     svg.setAttribute('height', H);
