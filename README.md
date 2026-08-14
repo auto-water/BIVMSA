@@ -73,9 +73,9 @@ MAS4MalSkill/
 ├── requirements.txt          # Python 依赖 (核心)
 ├── docs/
 │   ├── skill-scanner/        # 旧版 scanner 参考文档
-│   ├── BIV-SYSTEM-DOCS.md    # 完整系统文档 (mermaid 图)
-│   ├── my-approach-design.md         # 两轮 D-A 验证架构设计 (协议 P1-P7)
-│   └── my-approach-modification-plan.md  # 后续修改计划 (Phase 0-3)
+│   ├── system-diagrams.md    # 系统示意图 (mermaid: 架构/时序/流程/各 Phase)
+│   ├── execution-plan.md     # 修改执行计划 (Phase 0-4 进度)
+│   └── my-approach-modification-plan.md  # 修改计划依据 (Phase 0-3)
 ├── src/biv/                  # BIV 核心实现
 │   ├── taxonomy.py           # 7类x29能力 + 意图分类 + 规则
 │   ├── trace.py              # 调试追踪 (trace/result 分离)
@@ -668,7 +668,7 @@ flowchart LR
 | 2captcha | 良性 | 常规验证码服务 | benign (0.70) | benign | ✓ |
 | 1password-1 | 良性 | 密码管理 CLI | malware (0.80) | benign | ✗ 误报 |
 
-> **已知误报**：1password-1 是良性密码管理器，但诚实声明了读凭证能力，被确定性规则 `rule_3`（凭证窃取）误判为 malware。这正是安全类 skill 声明敏感能力导致的误报问题，与 `docs/my-approach-design.md` 中的 V_decl 误报防护方案相关（见修改计划 Phase 3.1）。
+> **已知误报**：1password-1 是良性密码管理器，但诚实声明了读凭证能力，被确定性规则 `rule_3`（凭证窃取）误判为 malware。这正是安全类 skill 声明敏感能力导致的误报问题，由 Phase 3 的 V_decl 声明轨道恶意通道与 LLM Judge 语义修正覆盖（见 `docs/system-diagrams.md`）。
 
 ---
 
