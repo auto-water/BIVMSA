@@ -420,41 +420,12 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   .ag-code .ag-code-text {{ font-family: Consolas, "Courier New", monospace; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }}
   #close {{ float: right; cursor: pointer; border: none; background: none; font-size: 20px; color: #999; }}
 </style>
-</head>
-<body>
-<header>
-  <h1>{html_escape(name)}</h1>
-  <div class="meta">
-    <span class="badge {'malware' if verdict == 'malware' else 'benign'}">{html_escape(verdict)}</span>
-    quadrant: {html_escape(quadrant)} · 动作指令加粗 + ▶ 可点击查看执行流 · <b>{mode}</b>
-  </div>
-  <div class="legend">{legend}</div>
-  {capspace}
-</header>
-<main id="skill">
-{''.join(rows_html)}
-</main>
-
-<div id="modal" onclick="if(event.target===this)hide()">
-  <div class="card">
-    <button id="close" onclick="hide()">×</button>
-    <h2>块审计信息</h2>
-    <div class="field"><span class="k">块 ID</span><span class="v" id="m-block"></span></div>
-    <div class="field"><span class="k">触发条件</span><span class="v" id="m-trigger"></span></div>
-    <div class="field"><span class="k">有无偏差</span><span class="v" id="m-dev"></span></div>
-    <div class="field"><span class="k">2×2 分类</span><span class="v" id="m-cls"></span></div>
-    <div class="field"><span class="k">关联能力</span><span class="v" id="m-caps"></span></div>
-    <div class="field"><span class="k">外部关联代码片段</span><span class="v" id="m-code"></span></div>
-    <div class="field"><span class="k">判定理由</span><span class="v" id="m-reason" style="background:#f6f8fa;padding:6px 8px;border-radius:6px;display:inline-block;"></span></div>
-    <div class="field"><span class="k">核心指令(摘要)</span><span class="v" id="m-core" style="background:#f6f8fa;padding:6px 8px;border-radius:6px;display:inline-block;white-space:pre-wrap;"></span></div>
-  </div>
-</div>
-
 <script>
   function escapeHtml(s) {{
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }}
   // 恶意调用链 DAG 图（借鉴 Cytoscape.js + Dagre：分层布局 + 节点卡片 + 贝塞尔箭头，原生实现）
+  // 定义在 <head> 顶部：<main> 内的调用 <script> 先于底部 script 执行，函数须先就绪。
   function renderGraph(gid, nodes, edges) {{
     const el = document.getElementById(gid);
     if (!el) return;
@@ -489,6 +460,38 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
     }});
     el.insertAdjacentHTML('beforeend', nodeHtml);
   }}
+</script>
+</head>
+<body>
+<header>
+  <h1>{html_escape(name)}</h1>
+  <div class="meta">
+    <span class="badge {'malware' if verdict == 'malware' else 'benign'}">{html_escape(verdict)}</span>
+    quadrant: {html_escape(quadrant)} · 动作指令加粗 + ▶ 可点击查看执行流 · <b>{mode}</b>
+  </div>
+  <div class="legend">{legend}</div>
+  {capspace}
+</header>
+<main id="skill">
+{''.join(rows_html)}
+</main>
+
+<div id="modal" onclick="if(event.target===this)hide()">
+  <div class="card">
+    <button id="close" onclick="hide()">×</button>
+    <h2>块审计信息</h2>
+    <div class="field"><span class="k">块 ID</span><span class="v" id="m-block"></span></div>
+    <div class="field"><span class="k">触发条件</span><span class="v" id="m-trigger"></span></div>
+    <div class="field"><span class="k">有无偏差</span><span class="v" id="m-dev"></span></div>
+    <div class="field"><span class="k">2×2 分类</span><span class="v" id="m-cls"></span></div>
+    <div class="field"><span class="k">关联能力</span><span class="v" id="m-caps"></span></div>
+    <div class="field"><span class="k">外部关联代码片段</span><span class="v" id="m-code"></span></div>
+    <div class="field"><span class="k">判定理由</span><span class="v" id="m-reason" style="background:#f6f8fa;padding:6px 8px;border-radius:6px;display:inline-block;"></span></div>
+    <div class="field"><span class="k">核心指令(摘要)</span><span class="v" id="m-core" style="background:#f6f8fa;padding:6px 8px;border-radius:6px;display:inline-block;white-space:pre-wrap;"></span></div>
+  </div>
+</div>
+
+<script>
   const items = {json.dumps(items, ensure_ascii=False)};
   const modal = document.getElementById('modal');
   function show(it) {{
