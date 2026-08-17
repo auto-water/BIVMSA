@@ -472,7 +472,7 @@ IMPORTANT:
 # Skill text normalization (Phase 3 preprocessing)
 # =============================================================================
 # v2: 不再按句末标点拆行（delete "标点后加换行"），块划分改由子智能体按
-# "同一触发条件下会执行的最大行区间"执行（见 docs/chunking-phase0-v2.md）。
+# "同一触发条件下会执行的最大行区间"执行（见 reference/chunking-phase0-v2.md）。
 # 这里仅保留"删空行 + strip"，行 = SKILL.md 物理行（去空行）。
 
 

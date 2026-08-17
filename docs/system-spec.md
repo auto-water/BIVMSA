@@ -690,15 +690,16 @@ MAS4MalSkill/
 ├── package.json                # npm scripts（audit/batch/benchmark/report/page/prompt:render/schema:check/test:smoke）
 ├── requirements.txt            # Python 依赖（pyyaml + tree-sitter 系列）
 ├── README.md                   # 使用手册（两模式 + 输入输出约定）
-├── docs/
+├── docs/                      # 说明文档
 │   ├── system-spec.md          # 本文档（系统说明书）
 │   ├── system-diagrams.md      # 系统示意图（8 张 mermaid）
+│   └── schemas/                # result / final-result / trace 三个 JSON Schema
+├── reference/                 # 开发过程参考文件
 │   ├── execution-plan.md       # 修改执行计划（Phase 0-4 进度）
 │   ├── my-approach-modification-plan.md  # 修改计划依据（Phase 0-3）
 │   ├── chunking-phase0-v2.md   # 块划分 v2 设计（触发条件块）
 │   ├── p-flow-investigation.md # P-flow 调研（Phase 3.3）
-│   ├── skill-scanner/          # 旧版 scanner 参考
-│   └── schemas/                # result / final-result / trace 三个 JSON Schema
+│   └── skill-scanner/          # 旧版 scanner 参考
 ├── src/biv/                    # BIV 核心实现（Python）
 │   ├── taxonomy.py             # 7×29 能力 + 8×36 意图 + 15 规则 + 10 kill-chain + 4 compound + tool 映射
 │   ├── trace.py                # TraceContext（线程安全追踪，与 result 分离）

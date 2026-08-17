@@ -71,12 +71,16 @@ MAS4MalSkill/
 ├── package.json              # npm scripts
 ├── README.md                 # 本文档
 ├── requirements.txt          # Python 依赖 (核心)
-├── docs/
+├── docs/                     # 说明文档
 │   ├── system-spec.md        # 系统说明书 (设计思路/术语/技术栈/编排/数据模型/可视化)
-│   ├── skill-scanner/        # 旧版 scanner 参考文档
 │   ├── system-diagrams.md    # 系统示意图 (mermaid: 架构/时序/流程/各 Phase)
+│   └── schemas/              # result / final-result / trace 三个 JSON Schema
+├── reference/                # 开发过程参考文件
 │   ├── execution-plan.md     # 修改执行计划 (Phase 0-4 进度)
-│   └── my-approach-modification-plan.md  # 修改计划依据 (Phase 0-3)
+│   ├── my-approach-modification-plan.md  # 修改计划依据 (Phase 0-3)
+│   ├── chunking-phase0-v2.md # 块划分 v2 设计 (触发条件块)
+│   ├── p-flow-investigation.md # P-flow 调研 (Phase 3.3)
+│   └── skill-scanner/        # 旧版 scanner 参考
 ├── src/biv/                  # BIV 核心实现
 │   ├── taxonomy.py           # 7类x29能力 + 意图分类 + 规则
 │   ├── trace.py              # 调试追踪 (trace/result 分离)

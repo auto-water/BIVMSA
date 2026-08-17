@@ -1,7 +1,7 @@
 """Phase 0 预处理 — 块划分 v2（触发条件块）。
 
 块划分不再按"每句一块"，而是由**子智能体**按"同一触发条件下会执行的最大行
-区间"划分（见 docs/chunking-phase0-v2.md）。本模块提供确定性的行级基础：
+区间"划分（见 reference/chunking-phase0-v2.md）。本模块提供确定性的行级基础：
 - `split_skill_units`: 拆 frontmatter 与 body（删空行，不拆句）
 - `build_phase0`: 产出 v2 初始结构（frontmatter 元数据块 + body 行，正文块待 agent 填充）
 - `chunk_skill_text`: 无 agent 时的兜底简化块（frontmatter + body 每行一块）

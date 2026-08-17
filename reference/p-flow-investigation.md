@@ -2,7 +2,7 @@
 
 > 日期：2026-08-13
 > 状态：调研完成，方案待评审
-> 关联：`docs/my-approach-modification-plan.md §3.3`（已有蓝图）、`src/biv/actual_track/ast_analyzer.py`（现状）、`src/biv/deviation.py`（消费方）、`scripts/skill_page.py`（前端）
+> 关联：`my-approach-modification-plan.md §3.3`（已有蓝图）、`src/biv/actual_track/ast_analyzer.py`（现状）、`src/biv/deviation.py`（消费方）、`scripts/skill_page.py`（前端）
 
 ---
 

@@ -1,6 +1,6 @@
 # BIV 修改执行计划
 
-> 依据：`docs/my-approach-modification-plan.md`（已废弃的 `docs/my-approach-design.md` **不**作为依据，凡涉及处以下文原则重定义）。
+> 依据：`my-approach-modification-plan.md`（已废弃的 `my-approach-design.md` **不**作为依据，凡涉及处以下文原则重定义）。
 > 基线：当前 `master`（提交 `007af62`）。
 > 现状：Phase 0 部分完成，Phase 1/2/3 全部未完成。
 
@@ -24,7 +24,7 @@
 > - 🔴 JS/Shell supplement findings 行号待增强（无精确位置分支）
 >
 > **进度 2026-08-14：Phase 0 块划分 v2（触发条件块，agent 驱动）**：
-> - ✅ `normalize_skill_text` 改为**删空行 + strip，不再按标点拆句**（v2，见 `docs/chunking-phase0-v2.md`）
+> - ✅ `normalize_skill_text` 改为**删空行 + strip，不再按标点拆句**（v2，见 `chunking-phase0-v2.md`）
 > - ✅ `src/biv/chunking.py`：frontmatter 元数据块 + body 行（`build_phase0` v2）；`skill_chunk.py` 输出 seed
 > - ✅ workflow Phase 0：**IncrementalAgent 增量划分**（每次新开无历史 agent 提交未覆盖区间，划出"同一触发条件最大行区间"块，收缩再开下一个）
 > - ✅ P3 vdecl 以块为单位（`block_classifications`，block_id 替代 line）；`render_sentence_classifier` 多行块渲染（块头 + 缩进 + 每块一条约束）
