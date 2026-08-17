@@ -1,4 +1,4 @@
-# MAS4MalSkillAudit — BIV 恶意 Skill 审计系统
+# BIV4MalSkillAudit — BIV 恶意 Skill 审计系统
 
 > **BIV (Behavioral Integrity Verification)** 多智能体系统，对未知 AI Agent Skill 进行上架前安全审计。
 >
