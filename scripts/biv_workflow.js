@@ -19,6 +19,57 @@ export const meta = {
 };
 
 // =============================================================================
+// Sanitize + base64 写盘（硬性过滤落盘 JSON）
+//   - 反斜杠 -> 正斜杠（Windows 路径否则产生非法 \x 转义）
+//   - 移除 emoji / 补充平面(4 字节宽字符) / C0-C1 控制字符 / 零宽与格式字符 / BOM
+//   - 保留 CJK（中文）与 BMP 可打印字符
+//   - 写盘用 base64 传输：subagent 只"盲抄"不可读的 base64（杜绝二次格式化/还原转义），
+//     decode 用 python（base64 命令在 Windows 可能缺失；外层脚本还会兜底 decode .b64）
+// =============================================================================
+function sanitizeText(s) {
+  if (typeof s !== 'string') return s;
+  let out = '';
+  for (const ch of s) {
+    if (ch === '\\') { out += '/'; continue; }                    // 反斜杠 -> 正斜杠
+    const cp = ch.codePointAt(0);
+    if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f)) continue;         // C0/C1 控制字符
+    if ((cp >= 0x200b && cp <= 0x200f) || cp === 0x2028 || cp === 0x2029
+        || cp === 0x2060 || cp === 0xfeff) continue;               // 零宽/行分隔/BOM
+    if (cp >= 0x10000) continue;                                   // 补充平面（emoji/宽字节）
+    if ((cp >= 0x2600 && cp <= 0x27bf) || (cp >= 0x2b00 && cp <= 0x2bff)) continue; // BMP emoji/符号块
+    out += ch;
+  }
+  return out;
+}
+
+function sanitizeValue(v) {
+  if (typeof v === 'string') return sanitizeText(v);
+  if (Array.isArray(v)) return v.map(sanitizeValue);
+  if (v && typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v)) o[k] = sanitizeValue(v[k]);
+    return o;
+  }
+  return v;
+}
+
+async function writeJsonViaBase64(agentFn, obj, outputFile, label = 'write-result') {
+  const outputDir = outputFile.substring(0, outputFile.lastIndexOf('/'));
+  const jsonText = JSON.stringify(sanitizeValue(obj), null, 2);
+  const b64 = Buffer.from(jsonText, 'utf8').toString('base64');
+  await agentFn(
+    `Write the file ${outputFile}:
+1. Create the directory: mkdir -p ${outputDir}
+2. Write the ENTIRE base64 payload below VERBATIM to ${outputFile}.b64 using the Write tool. It is opaque data — do NOT decode, wrap, modify, or add line breaks:
+${b64}
+3. Decode it with python: python -c "import base64;open('${outputFile}','wb').write(base64.b64decode(open('${outputFile}.b64').read()))"
+4. Remove the payload: rm -f ${outputFile}.b64
+5. Output ONLY the single word "ok".`,
+    { label }
+  );
+}
+
+// =============================================================================
 // Main Workflow
 // =============================================================================
 
@@ -665,18 +716,12 @@ const finalResult = {
 // --- Write result to experiment/results/ mirroring the cases structure ---
 // The Workflow script has no filesystem access, so the file is written by a
 // subagent. Override the path via args.output.
+// 硬性过滤：sanitizeValue 清洗文本（反斜杠→斜杠、去 emoji/宽字节/控制字符）后
+// 经 base64 传输写盘，subagent 只盲抄不解释；decode 失败时外层脚本兜底。
 const relPath = skillDir.replace('experiment/cases/', '');
 const outputFile = (args && args.output) || `experiment/results/${relPath}/result.json`;
-const outputDir = outputFile.substring(0, outputFile.lastIndexOf('/'));
 try {
-  await agent(
-    `Write the JSON content below to the file at ${outputFile}.
-First create the parent directory if it does not exist: mkdir -p ${outputDir}
-Output ONLY the single word "ok" on success. Do not modify the JSON content.
-
-${JSON.stringify(finalResult, null, 2)}`,
-    { label: 'write-result' }
-  );
+  await writeJsonViaBase64(agent, finalResult, outputFile, 'write-result');
   log(`Result written to ${outputFile}`);
 } catch (e) {
   log(`Warning: could not write ${outputFile}: ${e}`);

@@ -265,6 +265,17 @@ run_wave() {
         for entry in "${active[@]}"; do
             local cname cdir rpath token start_ts
             IFS='|' read -r cname cdir rpath token start_ts <<< "$entry"
+            # .b64 兜底解码：workflow 内 subagent 若未完成 decode，脚本确定性解码
+            if [ ! -s "$rpath" ] && [ -s "$rpath.b64" ]; then
+                "$PYTHON_BIN" - "$rpath" "$rpath.b64" <<'PYEOF' >/dev/null 2>&1 || true
+import base64, sys
+try:
+    open(sys.argv[1], 'wb').write(base64.b64decode(open(sys.argv[2], 'rb').read()))
+except Exception:
+    pass
+PYEOF
+                rm -f "$rpath.b64"
+            fi
             if [ -s "$rpath" ]; then
                 local v s
                 IFS=$'\t' read -r v s <<< "$(extract_verdict "$rpath")"
