@@ -12,7 +12,7 @@
 
 export const meta = {
   name: 'biv-batch-audit',
-  description: 'Batch BIV audit with LLM — scans experiment/cases/ and runs full pipeline on each',
+  description: 'Batch BIVMSA audit with LLM — scans experiment/cases/ and runs full pipeline on each',
   phases: [
     { title: 'Discover', detail: 'Scan cases directory and read skill content' },
     { title: 'Audit', detail: 'Full pipeline (deterministic + LLM) per case' },

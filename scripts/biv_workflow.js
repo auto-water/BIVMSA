@@ -10,7 +10,7 @@
 
 export const meta = {
   name: 'biv-audit',
-  description: 'BIV (Behavioral Integrity Verification) skill audit — full pipeline with LLM calls',
+  description: 'BIVMSA (Behavior Integrity Verification for Malicious Skill Audit) — full pipeline with LLM calls',
   phases: [
     { title: 'Extract', detail: 'Capability extraction: deterministic + LLM declared/instruction analysis' },
     { title: 'Detect', detail: 'Deviation detection and compound flag analysis' },

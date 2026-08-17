@@ -1,8 +1,8 @@
 # BIV 系统说明书（System Specification）
 
-> **BIV4MalSkillAudit** — Behavioral Integrity Verification for AI Agent Skills
+> **BIVMSA** — Behavior Integrity Verification for Malicious Skill Audit
 >
-> 版本：v2.0（2026-08-17）　·　仓库：`auto-water/BIV4MalSkillAudit`　·　来源：复现论文 *Behavioral Integrity Verification for AI Agent Skills*（Yuhao Wu et al., 2025, arXiv:2605.11770）
+> 版本：v2.0（2026-08-17）　·　仓库：`auto-water/BIVMSA`　·　来源：复现论文 *Behavioral Integrity Verification for AI Agent Skills*（Yuhao Wu et al., 2025, arXiv:2605.11770）
 >
 > **分工声明**：论文 BIV 工作聚焦于**行为完整性**——即"声明 vs 实际"的双轨验证框架、能力 Taxonomy、偏差定义、Relaxed-Veto 判定等核心判定内核。本文档所述系统中，**其余部分逻辑**（Phase 0 触发块划分、Workflow 多智能体编排、提示词管理、数据模型、可视化前端、U1-U8 块级识别、攻击链重构等）**由本仓库作者开发填充**。凡属作者填充部分，正文中以「工程实现」标注。
 
@@ -45,7 +45,7 @@
 
 ## 摘要
 
-BIV（Behavioral Integrity Verification，行为完整性验证）是一个对 **AI Agent Skill**（如 Claude Code Skills）做**上架前安全审计**的多智能体系统。
+BIVMSA（Behavior Integrity Verification for Malicious Skill Audit，恶意 Skill 审计行为完整性验证）是一个对 **AI Agent Skill**（如 Claude Code Skills）做**上架前安全审计**的多智能体系统。
 
 **输入**：一个 Skill 目录（`SKILL.md` + 可选 `scripts/` 脚本 + 可选 `references/` 参考文档）。
 
@@ -208,7 +208,7 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 
 | 术语 | 全称 | 含义 |
 |------|------|------|
-| BIV | Behavioral Integrity Verification | 行为完整性验证：声明 vs 实际的偏差审计框架 |
+| BIVMSA | Behavior Integrity Verification for Malicious Skill Audit | 项目名（行为完整性验证 × 恶意 Skill 审计） |
 | D(s) | Declared capabilities | 声明能力集（frontmatter + body） |
 | A(s) | Actual capabilities | 实际能力集（AST + regex + LLM 指令） |
 | U(s) | Undeclared | 未声明能力（`covered_by_declared==false`，非严格集合差） |
@@ -957,7 +957,7 @@ compound flags 优先用数据流证据，**无 flow 时回退到能力共现**�
 ## 19　目录结构
 
 ```
-MAS4MalSkill/                    # 本地工作目录名（仓库名 BIV4MalSkillAudit）
+MAS4MalSkill/                    # 本地工作目录名（仓库名 BIVMSA）
 ├── package.json                 # npm scripts（audit/batch/benchmark/report/page/...）
 ├── requirements.txt             # Python 依赖
 ├── docs/

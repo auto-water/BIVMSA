@@ -1,6 +1,6 @@
-# BIV4MalSkillAudit — BIV 恶意 Skill 审计系统
+# BIVMSA — 恶意 Skill 审计系统
 
-> **BIV (Behavioral Integrity Verification)** 多智能体系统，对未知 AI Agent Skill 进行上架前安全审计。
+> **BIVMSA (Behavior Integrity Verification for Malicious Skill Audit)** 多智能体系统，对未知 AI Agent Skill 进行上架前安全审计。
 >
 > 输入一个 Skill 目录，输出 `benign`（良性，可上架）或 `malware`（恶意，拒绝上架）的判定及完整证据链。
 >
