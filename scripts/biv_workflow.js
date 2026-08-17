@@ -53,10 +53,53 @@ function sanitizeValue(v) {
   return v;
 }
 
+// 纯 JS UTF-8 -> base64（workflow 运行时无 Node Buffer / TextEncoder / btoa）。
+// sanitizeValue 已剔除补充平面字符，但保留代理对分支以防万一。
+function utf8ToBase64(input) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let utf8 = '';
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    if (c < 0x80) utf8 += String.fromCharCode(c);
+    else if (c < 0x800) utf8 += String.fromCharCode(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else if (c < 0xd800 || c >= 0xe000) {
+      utf8 += String.fromCharCode(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    } else {
+      i += 1;
+      const c2 = input.charCodeAt(i);
+      const cp = 0x10000 + (((c & 0x3ff) << 10) | (c2 & 0x3ff));
+      utf8 += String.fromCharCode(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    }
+  }
+  let b64 = '';
+  let i = 0;
+  for (; i + 3 <= utf8.length; i += 3) {
+    const n = (utf8.charCodeAt(i) << 16) | (utf8.charCodeAt(i + 1) << 8) | utf8.charCodeAt(i + 2);
+    b64 += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + chars[(n >> 6) & 63] + chars[n & 63];
+  }
+  const rem = utf8.length - i;
+  if (rem === 1) {
+    const n = utf8.charCodeAt(i) << 16;
+    b64 += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + '==';
+  } else if (rem === 2) {
+    const n = (utf8.charCodeAt(i) << 16) | (utf8.charCodeAt(i + 1) << 8);
+    b64 += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + chars[(n >> 6) & 63] + '=';
+  }
+  return b64;
+}
+
+// 规范化路径：/e/xxx -> E:/xxx（bash 的 MSYS 路径 Write/Python 工具不识别）。
+function normPath(p) {
+  if (typeof p !== 'string') return p;
+  const m = p.match(/^\/([a-zA-Z])\/(.*)$/);
+  return m ? `${m[1].toUpperCase()}:/${m[2]}` : p;
+}
+
 async function writeJsonViaBase64(agentFn, obj, outputFile, label = 'write-result') {
+  outputFile = normPath(outputFile);
   const outputDir = outputFile.substring(0, outputFile.lastIndexOf('/'));
   const jsonText = JSON.stringify(sanitizeValue(obj), null, 2);
-  const b64 = Buffer.from(jsonText, 'utf8').toString('base64');
+  const b64 = utf8ToBase64(jsonText);
   await agentFn(
     `Write the file ${outputFile}:
 1. Create the directory: mkdir -p ${outputDir}
