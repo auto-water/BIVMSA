@@ -164,3 +164,48 @@ flowchart LR
     FI --> CHAIN
     CHAIN --> FE[前端 DAG 图渲染<br/>User → 输入 → 恶意块 → flow-items]
 ```
+
+## 9. 单 case 审计：静态管线 × 动态管线（数据传递）
+
+> 两条管线共享 `skill_parser` 解析产物；静态管线的确定性证据（Φ(s)、代码证据、det 判定）是动态管线 LLM Judge 与 V_decl 的输入；D/A 能力集双轨合并后进入最终判定 `ŷ = V_actual ∨ V_decl ∨ Judge`。
+
+```mermaid
+flowchart TD
+    IN["SKILL.md + scripts/ + references/"] --> PARSE["skill_parser 稳定解析<br/>frontmatter / body / scripts"]
+
+    subgraph STATIC["静态管线 · 确定性静态分析（模式 A · Python）"]
+        direction TB
+        FM["frontmatter 解析<br/>allowed-tools / hooks"] --> DET["D_det 声明能力"]
+        AST["AST 污点分析 + Regex 模式<br/>+ 结构攻击检测"] --> AET["A_ast ∪ A_regex<br/>+ flows_ast"]
+        DET --> DEV["偏差检测 U/O + compound"]
+        AET --> DEV
+        DEV --> PHI["Φ(s) 证据元组"]
+        PHI --> RULE["规则引擎 + Relaxed-Veto"]
+        RULE --> DETV["_det_verdict"]
+        AST --> CCE["capability_code_evidence<br/>代码片段 + 行号"]
+    end
+
+    subgraph DYN["动态管线 · LLM 语义增强（模式 B · Workflow）"]
+        direction TB
+        BODY["body 语义提取"] --> DLLM["D_llm 声明能力"]
+        INS["A_llm_instr 指令分析<br/>covered_by_declared → 语义 U"] --> ALLM["A_llm 实际能力"]
+        P0["Phase 0 触发条件块"] --> VD["V_decl 块级分类<br/>U1-U8 无条件有害"]
+        VD --> JDG["LLM Judge"]
+        JDG --> FINAL["最终判定 ŷ"]
+    end
+
+    PARSE --> FM
+    PARSE --> AST
+    PARSE --> BODY
+    PARSE --> INS
+
+    DET -- "D = D_det ∪ D_llm" --> DLLM
+    AET -- "A = A_ast ∪ A_regex ∪ A_llm" --> ALLM
+    PHI -- "Φ(s) 证据 evidence_summary" --> JDG
+    CCE -- "代码证据（恶意块引用）" --> VD
+    RULE -- "V_actual ∨" --> FINAL
+    VD -- "V_decl ∨" --> FINAL
+
+    FINAL --> OUT["result.json + trace.json"]
+    OUT --> VIZ["前端标注页 / report / benchmark"]
+```
