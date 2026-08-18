@@ -1,22 +1,197 @@
-# BIV benchmark manifest
-#
-# Ground truth label defaults to the path segment (benign/ or malware/). Entries
-# here (a) document each registered case's expected label + note, and (b) override
-# the derived label when the path has no label segment (e.g. a flat 8000-sample dump).
-#
-# Paths are relative to experiment/cases/ and use POSIX separators.
-# Auto-register new datasets with: python scripts/register_dataset.py --dataset <name>
-
 cases:
-  - name: std-cases-4/benign/1password-1
-    expected: benign
-    note: 良性密码管理器 — 已知 rule_3 误报（声明 cred-read，实际为正常工具）
-  - name: std-cases-4/benign/2captcha
-    expected: benign
-    note: CAPTCHA 服务 CLI 封装
-  - name: std-cases-4/malware/000-jeremy-content-consistency-validator__CI_B4
-    expected: malware
-    note: dropper — 下载即执行
-  - name: std-cases-4/malware/ai-wrapper-product__CI_B6
-    expected: malware
-    note: 反向 shell（net.createConnection + stdin/stdout 重定向）
+- name: std-cases-4/benign/1password-1
+  expected: benign
+  note: 良性密码管理器 — 已知 rule_3 误报（声明 cred-read，实际为正常工具）
+- name: std-cases-4/benign/2captcha
+  expected: benign
+  note: CAPTCHA 服务 CLI 封装
+- name: std-cases-4/malware/000-jeremy-content-consistency-validator__CI_B4
+  expected: malware
+  note: dropper — 下载即执行
+- name: std-cases-4/malware/ai-wrapper-product__CI_B6
+  expected: malware
+  note: 反向 shell（net.createConnection + stdin/stdout 重定向）
+- name: hard/benign/auto-skill-evolver
+  expected: benign
+- name: hard/benign/autoresearch
+  expected: benign
+- name: hard/benign/clawdrug
+  expected: benign
+- name: hard/benign/cursor-council
+  expected: benign
+- name: hard/benign/denario-skill
+  expected: benign
+- name: hard/benign/flyworks-avatar-video
+  expected: benign
+- name: hard/benign/hallo123
+  expected: benign
+- name: hard/benign/libtv-skills
+  expected: benign
+- name: hard/benign/openclaw-huckleberry-skill
+  expected: benign
+- name: hard/benign/polymarket-mert-sniper
+  expected: benign
+- name: hard/benign/roster
+  expected: benign
+- name: hard/benign/sudoku
+  expected: benign
+- name: hard/benign/telegram-pairing-approver
+  expected: benign
+- name: hard/benign/tesla-tessie
+  expected: benign
+- name: hard/benign/ui-ux-pro-max
+  expected: benign
+- name: hard/malware/000-jeremy-content-consistency-validator__PI_B10
+  expected: malware
+- name: hard/malware/Data Privacy Compliance
+  expected: malware
+- name: hard/malware/Test Engineer
+  expected: malware
+- name: hard/malware/Uniswap V3 Position Manager
+  expected: malware
+- name: hard/malware/ab-test-setup__PI_B15
+  expected: malware
+- name: hard/malware/analyze__PI_B10
+  expected: malware
+- name: hard/malware/archivist
+  expected: malware
+- name: hard/malware/auto-updater-5buwl
+  expected: malware
+- name: hard/malware/biopython
+  expected: malware
+- name: hard/malware/clawhub-happybigmtn-rbtc__v1.0.0
+  expected: malware
+- name: hard/malware/clawhub-hh1fd
+  expected: malware
+- name: hard/malware/clay-known-pitfalls
+  expected: malware
+- name: hard/malware/cognitive-walkthrough-facilitator
+  expected: malware
+- name: hard/malware/container-registry-strategist
+  expected: malware
+- name: hard/malware/content-moderation-qa
+  expected: malware
+- name: hard/malware/content-optimizer
+  expected: malware
+- name: hard/malware/cpp-perf-advisor
+  expected: malware
+- name: hard/malware/credential-lifecycle-manager
+  expected: malware
+- name: hard/malware/cross-chain-bridge-advisor
+  expected: malware
+- name: hard/malware/database-migrations-sql-migrations
+  expected: malware
+- name: hard/malware/db-index-optimizer
+  expected: malware
+- name: hard/malware/doc-coauthoring__PI_B15
+  expected: malware
+- name: hard/malware/docs-review__PI_B10
+  expected: malware
+- name: hard/malware/documentation-2
+  expected: malware
+- name: hard/malware/ethereum-gas-tracker-lm4cv
+  expected: malware
+- name: hard/malware/exercise-designer
+  expected: malware
+- name: hard/malware/frontend-performance-advisor
+  expected: malware
+- name: hard/malware/gas-optimization-advisor
+  expected: malware
+- name: hard/malware/klingai-storage-integration
+  expected: malware
+- name: hard/malware/kysely__PI_B15
+  expected: malware
+- name: hard/malware/market-insight-architect
+  expected: malware
+- name: hard/malware/media-asset-creator
+  expected: malware
+- name: hard/malware/model-evaluation-framework
+  expected: malware
+- name: hard/malware/nanobanana-pro
+  expected: malware
+- name: hard/malware/nostr-gateway
+  expected: malware
+- name: hard/malware/obsidian-bases__PI_B11__Partial_Injection
+  expected: malware
+- name: hard/malware/osram__PI_B15
+  expected: malware
+- name: hard/malware/photonic-systems-evaluator
+  expected: malware
+- name: hard/malware/polymarket-cexex
+  expected: malware
+- name: hard/malware/polymarketcli
+  expected: malware
+- name: hard/malware/project-overview
+  expected: malware
+- name: hard/malware/pymoo__PI_B10
+  expected: malware
+- name: hard/malware/python-testing-patterns
+  expected: malware
+- name: hard/malware/rendering-animate-svg__MIXED_B1
+  expected: malware
+- name: hard/malware/scroll-experience
+  expected: malware
+- name: hard/malware/search-tools__PI_B15
+  expected: malware
+- name: hard/malware/skill-composition-guide
+  expected: malware
+- name: hard/malware/slack-integration-architect
+  expected: malware
+- name: hard/malware/solana
+  expected: malware
+- name: hard/malware/solana-fckyq
+  expected: malware
+- name: hard/malware/solana-k7hyt
+  expected: malware
+- name: hard/malware/sre-playbook-manager
+  expected: malware
+- name: hard/malware/structured-data-optimizer
+  expected: malware
+- name: hard/malware/supply-chain-threat-scanner
+  expected: malware
+- name: hard/malware/test-validation-engine
+  expected: malware
+- name: hard/malware/training-acceleration-suite
+  expected: malware
+- name: hard/malware/tron
+  expected: malware
+- name: hard/malware/tronlink
+  expected: malware
+- name: hard/malware/twittertrends
+  expected: malware
+- name: hard/malware/ui-composition-studio
+  expected: malware
+- name: hard/malware/using-relational-databases
+  expected: malware
+- name: hard/malware/vault-integration-helper
+  expected: malware
+- name: hard/malware/verify__CI_B2
+  expected: malware
+- name: hard/malware/viral-generator-builder
+  expected: malware
+- name: hard/malware/wacli-1sk
+  expected: malware
+- name: hard/malware/windsurf-license-management__PI_B15
+  expected: malware
+- name: hard/malware/workspace-chat-automation
+  expected: malware
+- name: hard/malware/x-trends-el5qn
+  expected: malware
+- name: hard/malware/x-trends-qpaoo
+  expected: malware
+- name: hard/malware/x-twitter-trends
+  expected: malware
+- name: hard/malware/youtube-summarize-5oixh
+  expected: malware
+- name: hard/malware/youtube-summarize-8edua
+  expected: malware
+- name: hard/malware/youtube-summarize-r5ajr
+  expected: malware
+- name: hard/malware/youtube-summarize-umait
+  expected: malware
+- name: hard/malware/youtube-thumbnail-grabber-jwnwx
+  expected: malware
+- name: hard/malware/yt-summarize
+  expected: malware
+- name: hard/malware/yt-thumbnail-grabber
+  expected: malware

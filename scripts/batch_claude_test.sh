@@ -309,10 +309,13 @@ retry_pending() {
         round=$((round+1))
         local -a pend=()
         local cdir cname
-        for cdir in $(discover_cases); do
+        local -a all=()
+        while IFS= read -r c; do all+=("$c"); done < <(discover_cases)
+        for cdir in "${all[@]}"; do
             cname="$(basename "$cdir")"
             # 该 case 在 summary 中既无 DONE 也无需重试则跳过；有 FAIL/TIMEOUT 则重试
-            if ! grep -F "$cname" "$SUMMARY" 2>/dev/null | grep -q $'\tDONE\t'; then
+            # 精确匹配 summary 首列（避免 "tron" 误匹配 "tronlink" 等子串）
+            if ! awk -F'\t' -v n="$cname" '$1==n && $4=="DONE"' "$SUMMARY" 2>/dev/null | grep -q .; then
                 pend+=("$cdir")
             fi
         done
@@ -344,9 +347,12 @@ main() {
         log "恢复模式: $OUT_ROOT"
         local -a rcases=()
         local cdir cname
-        for cdir in $(discover_cases); do
+        local -a all=()
+        while IFS= read -r c; do all+=("$c"); done < <(discover_cases)
+        for cdir in "${all[@]}"; do
             cname="$(basename "$cdir")"
-            if ! grep -F "$cname" "$SUMMARY" 2>/dev/null | grep -q $'\tDONE\t'; then
+            # 精确匹配 summary 首列（避免 "tron" 误匹配 "tronlink" 等子串）
+            if ! awk -F'\t' -v n="$cname" '$1==n && $4=="DONE"' "$SUMMARY" 2>/dev/null | grep -q .; then
                 rcases+=("$cdir")
             fi
         done
