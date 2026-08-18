@@ -209,3 +209,24 @@ flowchart TD
     FINAL --> OUT["result.json + trace.json"]
     OUT --> VIZ["前端标注页 / report / benchmark"]
 ```
+
+## 10. LLM 三重幻觉控制
+
+> 对 LLM 提取的声明/指令能力做落库前校验，三道关卡逐项过滤。声明轨（`declared_track.validate_llm_output`）完整三道；指令轨（`llm_instruction.validate_instruction_llm_output`）为变体（能力类别限制 + 扎根阈值 50%）。详见 `docs/system-spec.md` §13.5。
+
+```mermaid
+flowchart TD
+    IN["LLM 输出<br/>capability + evidence"] --> VALID{"能力码合法?<br/>∈ ALL_CAPABILITY_CODES"}
+    VALID -->|非法| R0["拒绝 unknown capability"]
+    VALID -->|合法| C1{"关卡 1 · Taxonomy-echo<br/>回显检测"}
+    C1 -->|"evidence 归一化后<br/>== 能力描述 或 == 能力名"| R1["拒绝 taxonomy echo<br/>（模板回显）"]
+    C1 -->|通过| C2{"关卡 2 · Evidence grounding<br/>证据扎根"}
+    C2 -->|"归一化子串命中源文本<br/>或词集重合度 ≥ 60%<br/>（词数少于 3 直接拒绝）"| C3{"关卡 3 · Keyword quality<br/>领域关键词"}
+    C2 -->|不扎根| R2["拒绝 evidence 未在原文"]
+    C3 -->|"critical / high 能力<br/>缺领域关键词"| R3["拒绝 缺关键词"]
+    C3 -->|通过| OK["valid_capabilities<br/>+ evidence 入证据集"]
+    R0 --> REJ["rejected 列表（带原因）<br/>供 trace / 审计回溯"]
+    R1 --> REJ
+    R2 --> REJ
+    R3 --> REJ
+```

@@ -712,13 +712,47 @@ subagent 通过 Bash 调用 Python CLI，以 **stdout JSON** 交换结构化数�
 
 ### 13.5 三重幻觉控制
 
-LLM 提取声明/指令能力时，输出必须经校验才进入证据集：
+> 流程图见 `docs/system-diagrams.md` 第 10 图。
 
-1. **Taxonomy-echo rejection**：evidence 与能力描述/能力名归一化后完全一致 → 判定为回显模板文本，拒绝；
-2. **Substring evidence grounding**：evidence 必须与源文本做归一化子串匹配；失败则按词集重合度 ≥60%（词数 <3 直接拒绝）；
-3. **Keyword quality check**：critical/high 风险能力要求 evidence 含领域关键词（如 `cred-read` 需含 `key/token/secret/password`；`proc-exec-shell` 需含 `shell/bash/subprocess/execute`）。
+**目的**：LLM 提取的声明能力（D_llm）与指令能力（A_llm_instr）在进入证据集前，必须通过三道校验关卡，防止两类幻觉：
+- **编造证据**：LLM 输出源文本中不存在的"证据"；
+- **回显模板**：LLM 把提示词里的 taxonomy 描述原样当证据返回。
 
-LLM 指令分析器另要求：能力必须是 taxonomy 中 `instr-*` 类、有非空 evidence、证据词覆盖 ≥50%。
+**执行顺序**：能力码合法性 → 关卡 1 → 关卡 2 → 关卡 3 → 入证据集；任一道拒绝即计入 `rejected`（带原因，供 trace / 审计回溯）。
+
+#### 关卡 1 — Taxonomy-echo rejection（模板回显拒绝）
+
+| 项 | 说明 |
+|----|------|
+| 判定 | evidence 归一化后与能力**描述**（`CAPABILITIES[cap].description`）或**能力名**（`name`）**完全一致** → 回显，拒绝 |
+| 归一化 | 去首尾空白、折叠内部空白、转小写（`_normalize_text`） |
+| 落点 | `declared_track.py:257` `_is_taxonomy_echo` |
+
+#### 关卡 2 — Substring evidence grounding（证据扎根）
+
+| 项 | 说明 |
+|----|------|
+| 判定 | evidence 必须能在**源文本**（SKILL.md 全文，归一化后）中找到依据：先尝试**归一化子串匹配**（evidence ⊆ content）；失败则按**词集重合**：`|evidence词 ∩ content词| / |evidence词| ≥ 60%` |
+| 特例 | evidence **词数 < 3** 直接拒绝（太短无法判定扎根） |
+| 落点 | `declared_track.py:278` `_is_evidence_grounded` |
+
+#### 关卡 3 — Keyword quality check（领域关键词质量）
+
+| 项 | 说明 |
+|----|------|
+| 判定 | **仅对 critical/high 风险能力**生效：evidence 必须含该能力的领域关键词 |
+| 关键词表 | `KEYWORD_CHECKS`：如 `cred-read→key/token/secret/password/credential/api/auth/ssh`；`proc-exec-shell→shell/bash/subprocess/command/execute/run`；`instr-silent-exec→background/silent/daemon/thread/auto/hook/lifecycle`；`instr-conceal→hidden/conceal/zero-width/unicode/base64/obfuscat` 等 |
+| 兜底 | 无关键词表的能力直接通过 |
+| 落点 | `declared_track.py:302` `_passes_keyword_check` |
+
+#### 调用点与差异
+
+| 调用点 | 三道关卡 | 差异 |
+|--------|---------|------|
+| **声明轨** `declared_track.validate_llm_output` | 完整三道 | 词集重合阈值 **60%**；高风险能力走关键词检查 |
+| **指令轨** `llm_instruction.validate_instruction_llm_output` | 变体 | 能力必须为 `instr-*` 类别（非则拒绝）+ 非空 evidence + 词集重合阈值 **50%**（更宽松——instr-* 类别本身已限域，且指令级证据常为短语） |
+
+**通过产物**：`valid_capabilities`（Set）+ `evidence`（`source_type: llm_semantic` / `llm_instruction`，含 `evidence_location`）；拒绝项全部落入 `rejected` 列表。
 
 ### 13.6 缓存与可复现
 
