@@ -6,33 +6,37 @@
 ## 1. 系统架构图
 
 ```mermaid
-flowchart TD
-    SKILL[SKILL.md] --> P0[Phase 0 · 块划分<br/>frontmatter 元数据块 + 触发条件块<br/>agent 增量划分]
-    P0 --> P1[Phase 1 · A/D 提取]
-    P1 --> P2[Phase 2 · 偏差检测]
-    P2 --> P3[Phase 3 · 恶意审计]
-    P3 --> P4[Phase 4 · 恶意调用链]
-    P4 --> R[result.json]
+flowchart LR
+    SKILL[SKILL.md] --> PH0["Phase 0 · 块划分<br/>触发条件块 + frontmatter"]
+    PH0 --> SG1
+    SG1 --> SG2
+    SG2 --> SG3
+    SG3 --> SG4
+    SG4 --> R["result.json + trace.json"]
 
-    subgraph P1[A/D 提取]
-      D[D = 描述包含的所有敏感操作<br/>D_det ∪ D_llm]
-      A[A = 真实执行的所有敏感操作<br/>A_ast ∪ A_regex ∪ A_llm]
+    subgraph SG1["Phase 1 · A/D 提取"]
+      direction TB
+      D["D = 描述包含的敏感操作<br/>D_det ∪ D_llm"]
+      A["A = 真实执行的敏感操作<br/>A_ast ∪ A_regex ∪ A_llm"]
     end
 
-    subgraph P2[偏差检测]
-      U[U = 超出声明意图的操作<br/>covered_by_declared=false]
-      O[O = D − A 过度声明]
-      CF[compound_flags + flows]
+    subgraph SG2["Phase 2 · 偏差检测"]
+      direction TB
+      U["U = 超出声明意图<br/>covered_by_declared = false"]
+      O["O = D − A 过度声明"]
+      CF["compound_flags + flows"]
     end
 
-    subgraph P3[恶意审计]
-      VA[V_actual<br/>rule_engine + relaxed_veto]
-      VD[V_decl<br/>块级分类 + U1-U8 无条件有害]
-      J[LLM Judge<br/>语义综合判定]
+    subgraph SG3["Phase 3 · 恶意审计"]
+      direction TB
+      VA["V_actual<br/>rule_engine + relaxed_veto"]
+      VD["V_decl<br/>U1-U8 无条件有害"]
+      J["LLM Judge<br/>语义综合判定"]
     end
 
-    subgraph P4[调用链]
-      AC[每个恶意块 → 子智能体<br/>user_input + flow_items]
+    subgraph SG4["Phase 4 · 调用链"]
+      direction TB
+      AC["恶意块 → 子智能体<br/>user_input + flow_items"]
     end
 ```
 
