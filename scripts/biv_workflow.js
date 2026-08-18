@@ -644,16 +644,17 @@ log('Phase 4: constructing malicious attack chains...');
 let attackChains = [];
 const maliciousBlocks = (vdeclResult?.block_classifications || [])
   .filter(b => b && b.classification && b.classification.includes('malicious'));
-if (maliciousBlocks.length > 0) {
-  // capability_code_evidence 不在 --evidence 紧凑输出里，需取完整确定性结果
-  const detFull = parseJsonOutput(await agent(
-    `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences:
+// 完整确定性结果（phase1 含 D_deterministic / A_ast / A_regex / capability_code_evidence /
+// flows_ast）——--evidence 紧凑输出不含这些，无条件补跑完整管道供前端展示与 Phase 4 使用。
+const detFull = parseJsonOutput(await agent(
+  `Run this shell command and return its EXACT raw stdout output with NO commentary, NO markdown code fences:
 
 python scripts/biv_audit.py ${skillDir}
 
 The output is a single JSON object. Output ONLY that JSON object.`,
-    { label: 'det-full-phase4' }
-  ));
+  { label: 'det-full-phase1' }
+));
+if (maliciousBlocks.length > 0) {
   const cce = (detFull && detFull.phase1 && detFull.phase1.capability_code_evidence) || {};
   const chainResults = await Promise.all(maliciousBlocks.map(async (mb, idx) => {
     // 精简 vars：block.text 截短、code_evidence 只保留该块涉及的能力，
@@ -749,6 +750,11 @@ const finalResult = {
   attack_chains: attackChains,
   // Phase 0: structured blocks (downstream annotation units)
   phase0: phase0,
+  // Phase 1: full deterministic pipeline result merged so the frontend has
+  // D_deterministic / A_ast / A_regex / capability_code_evidence / flows_ast
+  phase1: (detFull && detFull.phase1) || null,
+  // D_llm capability codes (skill_page reads this; keep parity with batch_workflow)
+  d_llm_caps: (dLlmResult?.declared_capabilities || []).map(c => c.capability),
   // Deterministic evidence passed through for traceability
   deterministic_evidence: detEvidence || null,
   _meta: {
