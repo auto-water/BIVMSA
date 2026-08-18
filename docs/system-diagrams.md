@@ -7,17 +7,20 @@
 
 ```mermaid
 flowchart LR
-    SKILL[SKILL.md] --> PH0["Phase 0 · 块划分<br/>触发条件块 + frontmatter"]
-    PH0 --> SG1
-    SG1 --> SG2
-    SG2 --> SG3
-    SG3 --> SG4
-    SG4 --> R["result.json + trace.json"]
+    SKILL["SKILL.md"] --> PH0["Phase 0 · 块划分<br/>触发条件块 + frontmatter"]
+    PH0 --> D
+    D --> A
+    A --> U
+    U --> CF
+    CF --> VA
+    VA --> J
+    J --> AC
+    AC --> R["result.json + trace.json"]
 
     subgraph SG1["Phase 1 · A/D 提取"]
       direction TB
-      D["D = 描述包含的敏感操作<br/>D_det ∪ D_llm"]
-      A["A = 真实执行的敏感操作<br/>A_ast ∪ A_regex ∪ A_llm"]
+      D["D = 声明能力<br/>D_det ∪ D_llm"]
+      A["A = 实际能力<br/>A_ast ∪ A_regex ∪ A_llm"]
     end
 
     subgraph SG2["Phase 2 · 偏差检测"]
