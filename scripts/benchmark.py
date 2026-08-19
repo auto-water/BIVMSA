@@ -96,6 +96,14 @@ def extract_verdicts(data: dict) -> tuple:
             det = dv2.get("verdict") if isinstance(dv2, dict) else None
             if not isinstance(det, str) or det not in VALID:
                 det = None
+    if not det:
+        # biv_workflow shape: {"deterministic_evidence": {"_det_verdict": {"verdict": ...}}}
+        de = data.get("deterministic_evidence")
+        if isinstance(de, dict):
+            dv3 = de.get("_det_verdict") or {}
+            det = dv3.get("verdict") if isinstance(dv3, dict) else None
+            if not isinstance(det, str) or det not in VALID:
+                det = None
     return det, llm
 
 
