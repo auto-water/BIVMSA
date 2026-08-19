@@ -654,6 +654,52 @@ python scripts/biv_audit.py ${skillDir}
 The output is a single JSON object. Output ONLY that JSON object.`,
   { label: 'det-full-phase1' }
 ));
+// 一致性兜底：最终判定 malware 但块级无恶意块时，从判定来源定位恶意块并标红，
+// 保证"判恶意必有恶意块 + 攻击链"（前端红色块）。
+{
+  const finalVerdict = vdeclFired ? 'malware' : (judgeResult?.verdict || 'benign');
+  if (finalVerdict === 'malware' && maliciousBlocks.length === 0) {
+    const allBlocks = vdeclResult?.block_classifications || [];
+    const candidates = new Set();
+    // ① vdecl unconditional_harmful 命中块
+    for (const h of (vdeclResult?.unconditional_harmful || [])) {
+      if (h && typeof h.block_id === 'number') candidates.add(h.block_id);
+    }
+    // ② Judge 证据能力 → capability_code_evidence（SKILL.md 行）→ 块
+    const cce = (detFull && detFull.phase1 && detFull.phase1.capability_code_evidence) || {};
+    const evText = String((judgeResult?.key_evidence || []).join(' ')) + ' ' + String(judgeResult?.reasoning || '');
+    const p0blocks = blocks || [];
+    for (const cap of Object.keys(cce)) {
+      if (!evText.includes(cap)) continue;
+      for (const loc of (cce[cap].locations || [])) {
+        if (!loc.file || !loc.line_start) continue;
+        if (!String(loc.file).toLowerCase().includes('skill.md')) continue;
+        for (const b of p0blocks) {
+          if (typeof b.line_start === 'number' && typeof b.line_end === 'number'
+              && loc.line_start >= b.line_start && loc.line_start <= b.line_end) {
+            candidates.add(b.block_id);
+          }
+        }
+      }
+    }
+    // ③ 兜底：第一个 action_instruction 块，否则第一个块
+    if (candidates.size === 0) {
+      const first = allBlocks.find(b => b.kind === 'action_instruction') || allBlocks[0];
+      if (first) candidates.add(first.block_id);
+    }
+    maliciousBlocks = allBlocks.filter(b => b && candidates.has(b.block_id));
+    for (const b of maliciousBlocks) {
+      if (!b.classification || !String(b.classification).includes('malicious')) {
+        b.classification = 'deviated-malicious';
+        b.malicious_label = 'malicious';
+        b.reason = (b.reason ? b.reason + '; ' : '') + '[Phase4兜底] 全局判定 malware，标记该块为恶意';
+      }
+    }
+    if (maliciousBlocks.length > 0) {
+      log(`Phase 4 fallback: 最终判定 malware，定位到 ${maliciousBlocks.length} 个恶意块并标红`);
+    }
+  }
+}
 if (maliciousBlocks.length > 0) {
   const cce = (detFull && detFull.phase1 && detFull.phase1.capability_code_evidence) || {};
   const chainResults = await Promise.all(maliciousBlocks.map(async (mb, idx) => {
