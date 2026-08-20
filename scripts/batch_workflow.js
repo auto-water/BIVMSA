@@ -529,12 +529,22 @@ Return a single JSON object:
 {"action": "submit", "start_line": N, "end_line": M, "summary": "<what this one operation does, <=200 chars>"}
 OR {"action": "finish"} if the remaining scope has NO operation and NO directive (only headings, blank lines, list markers, code-fence lines, comments, or purely descriptive prose).`;
 
+        // ---- Phase 0 截断预算 ----
+        // 防止对超大 body 逐块切造成 agent 调用风暴（后端慢时 40+ 次串行调用极慢）。
+        // 达到预算即停止细粒度切分，剩余未覆盖行合并为一个兜底块。
+        const PHASE0_MAX_AGENTS = 40;       // partition + action 总 agent 预算
+        const MAX_ACTIONS_PER_ENTRY = 30;   // 每 Entry 内 action 上限
+        const MAX_TOTAL_BLOCKS = 60;        // 总块数上限（含 frontmatter）
+        let phase0Agents = 0;
+
         const entries = [];
         let pStart = bodyOffset + 1;
         let pIter = 0, pStall = 0;
         const P_MAX = 40;
         let stalled = false;
-        while (pStart <= bodyTotal && pIter < P_MAX) {
+    let pFinished = false;
+        while (pStart <= bodyTotal && pIter < P_MAX && phase0Agents < PHASE0_MAX_AGENTS) {
+          phase0Agents += 1;
           const prevP = pStart;
           const remainingP = bodyLines.slice(pStart - bodyOffset - 1).join('\n');
           const r = parseJsonOutput(await agent(
@@ -567,24 +577,34 @@ OR {"action": "finish"} if the remaining scope has NO operation and NO directive
           pStall = 0;
           pIter += 1;
         }
+        // partition 截断兜底：因预算/上限停止且仍有未分区 body → 作为兜底 Entry（避免剩余行丢失）
+        if (!pFinished && pStart <= bodyTotal) {
+          entries.push({ start_line: pStart, end_line: bodyTotal, subkind: 'other',
+            summary: '[截断] partition 预算耗尽，剩余行兜底' });
+        }
         log(`[${caseName}] Phase 0 partition: ${entries.length} trigger entries`);
 
         for (const e of entries) {
+          if (phase0Agents >= PHASE0_MAX_AGENTS || actionBlocks.length + 1 >= MAX_TOTAL_BLOCKS) break;
           let aStart = e.start_line;
           let aIter = 0, aStall = 0;
-          const A_MAX = 80;
-          while (aStart <= e.end_line && aIter < A_MAX) {
+      let aFinished = false;
+          while (aStart <= e.end_line && aIter < MAX_ACTIONS_PER_ENTRY
+                 && phase0Agents < PHASE0_MAX_AGENTS
+                 && actionBlocks.length + 1 < MAX_TOTAL_BLOCKS) {
+            phase0Agents += 1;
             const prevA = aStart;
             const remainingA = bodyLines.slice(aStart - bodyOffset - 1, e.end_line - bodyOffset).join('\n');
             const r = parseJsonOutput(await agent(
               `${ACTION_RULES}\n\n## Assigned scope (global de-blanked lines)\n${e.start_line}..${e.end_line}\n\n## Uncovered remaining Entry text (starting at global line ${aStart})\n${remainingA}\n\n## Output JSON`,
               { label: `action-extract-${caseName}-${e.start_line}-${aIter}` }
             ));
-            if (r && r.action === 'finish') break;
+            if (r && r.action === 'finish') { aFinished = true; break; }
             const aS = (r && typeof r.start_line === 'number') ? r.start_line : aStart;
             const aE = (r && typeof r.end_line === 'number') ? r.end_line : aStart;
-            // 硬约束：action 区间必须覆盖当前起点，否则视为无效提交 → 停滞
-            const validA = aS <= aStart && aE >= aStart;
+            // 硬约束：action 起点必须 >= 当前未覆盖起点（允许跳过标题/描述等非动作前缀行），
+            // 且区间在 Entry 内、end>=start；否则视为无效提交 → 停滞。
+            const validA = aS >= aStart && aE >= aS && aE <= e.end_line;
             if (!validA) {
               aStall += 1;
               log(`[${caseName}] Phase 0 action-extract 无效提交（start=${aStart}）第 ${aStall} 次`);
@@ -609,6 +629,22 @@ OR {"action": "finish"} if the remaining scope has NO operation and NO directive
             aStart = Math.min(e.end_line, effEndA) + 1;
             aStall = 0;
             aIter += 1;
+          }
+          // 截断兜底：因预算/上限停止且该 Entry 仍有未覆盖行 → 合并为一个兜底 action 块
+          if (!aFinished && aStart <= e.end_line && actionBlocks.length + 1 < MAX_TOTAL_BLOCKS) {
+            const restLines = bodyLines.slice(aStart - bodyOffset - 1, e.end_line - bodyOffset);
+            actionBlocks.push({
+              block_id: actionBlocks.length + 2,
+              kind: 'action',
+              line_start: aStart,
+              line_end: e.end_line,
+              trigger_condition: e.subkind,
+              entry_summary: e.summary,
+              summary: '[截断] 达到分块预算，剩余行合并',
+              text: restLines.join('\n'),
+              sentences: restLines,
+            });
+            log(`[${caseName}] Phase 0 action-extract 截断：entry ${e.start_line}-${e.end_line} 剩余 ${aStart}..${e.end_line} 合并兜底块`);
           }
         }
         const blocksOut = fmBlock ? [fmBlock, ...actionBlocks] : actionBlocks;
