@@ -98,6 +98,34 @@ detect_python() {
 }
 
 # ---------------------------------------------------------------------------
+# 2.5 平台探测 + 进程树清理（C3：防进程残留 / 并发写同一目录）
+# ---------------------------------------------------------------------------
+detect_os() {
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) echo windows ;;
+        *) echo unix ;;
+    esac
+}
+OS="$(detect_os)"
+kill_tree() {  # $1=pid —— 杀进程树（Windows taskkill /T；Unix 负 PID 组）
+    local pid="$1"
+    [ -z "$pid" ] && return 0
+    if [ "$OS" = "windows" ]; then
+        taskkill //F //T //PID "$pid" >/dev/null 2>&1 || true
+    else
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    fi
+}
+stop_token() {  # $1=token/pid  $2=case 名 —— bg 模式 claude stop；headless 模式杀进程树
+    if [ "$MODE" = "bg" ]; then
+        "$CLAUDE_BIN" stop "$1" >/dev/null 2>&1 || true
+    else
+        kill_tree "$1"
+    fi
+    log "已停止 [$2] 会话 $1"
+}
+
+# ---------------------------------------------------------------------------
 # 3. 解析参数
 # ---------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
@@ -175,7 +203,7 @@ except Exception:
     # 正则宽松提取顶层 verdict / verdict_source，避免整行判为失败
     try:
         txt = open(sys.argv[1], encoding='utf-8', errors='replace').read()
-        mv = re.search(r'"verdict"\s*:\s*"(benign|malware)"', txt)
+        mv = re.search(r'"verdict"\s*:\s*"(benign|malware|error)"', txt)
         ms = re.search(r'"verdict_source"\s*:\s*"([^"]+)"', txt)
         v = mv.group(1) if mv else '?'
         s = ms.group(1) if ms else ''
@@ -195,6 +223,13 @@ start_case() {
     name="$(basename "$case_dir")"
     case_log="$LOG_DIR/$name"
     mkdir -p "$case_log" "$(dirname "$result_path")"
+    # C3: resume 防并发写——若该 case 有旧会话 token，先停止再启动（避免两个会话写同一 result.json）
+    if [ "$MODE" = "bg" ] && [ -f "$case_log/session" ]; then
+        local old="$(cat "$case_log/session")"
+        [ -n "$old" ] && "$CLAUDE_BIN" stop "$old" >/dev/null 2>&1 || true
+    elif [ "$MODE" = "headless" ] && [ -f "$case_log/pid" ]; then
+        kill_tree "$(cat "$case_log/pid")"
+    fi
     prompt="$(build_prompt "$case_dir" "$result_path")"
     printf '%s\n' "$prompt" > "$case_log/prompt"
 
@@ -281,10 +316,14 @@ PYEOF
                 IFS=$'\t' read -r v s <<< "$(extract_verdict "$rpath")"
                 printf '%s\t%s\t%s\tDONE\t%s\n' "$cname" "$v" "$s" "$token" >> "$SUMMARY"
                 log "完成 [$cname]  verdict=$v source=$s"
+                # C3: 完成后立即停止会话（--bg 会话持久，不 stop 会残留继续吃 API）
+                [ -n "$token" ] && [ "$token" != "-" ] && stop_token "$token" "$cname"
                 done=$((done+1))
             elif [ $(( $(date +%s) - start_ts )) -ge "$deadline_sec" ]; then
                 printf '%s\t?\t\tTIMEOUT\t%s\n' "$cname" "$token" >> "$SUMMARY"
-                err "超时 [$cname] token=$token（可手动: $CLAUDE_BIN logs $token）"
+                err "超时 [$cname] token=$token"
+                # C3: 超时即杀后台会话，避免僵尸会话残留
+                [ -n "$token" ] && [ "$token" != "-" ] && stop_token "$token" "$cname"
                 timo=$((timo+1))
             else
                 keep+=("$entry")
@@ -339,6 +378,14 @@ main() {
         return 0
     fi
 
+    # C3: 单实例锁——同一 run 目录只允许一个实例（防多 resume 并发写同一 result.json）
+    mkdir -p "$OUT_ROOT"
+    LOCK_DIR="$OUT_ROOT/.lock"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        err "已有运行实例（$LOCK_DIR 存在）。确认无其他实例后删除该目录重试，或用 --name 指定新 run。"
+        exit 1
+    fi
+
     if [ "$RESUME" = "1" ]; then
         if [ ! -f "$SUMMARY" ]; then
             err "无可恢复的 run（$SUMMARY 不存在）。可用 --name 指定已有 run。"
@@ -366,8 +413,19 @@ main() {
     log "用例目录: $CASES_DIR"
     log "输出目录: $OUT_ROOT"
 
-    # Ctrl+C 时提示当前活跃会话，便于后续 --resume / 手动 stop
-    trap 'err "中断！活跃 session 见 $LOG_DIR 下各 case/session 文件。可用: $CLAUDE_BIN stop <id> 停止，或 --resume 续跑。"' INT
+    # C3: 全清 trap——中断/终止/退出时停止所有活跃会话（bg 会话 / headless pid）并释放锁
+    cleanup() {
+        err "清理: 停止活跃会话并释放锁..."
+        local s p
+        for s in "$LOG_DIR"/*/session; do
+            [ -f "$s" ] && stop_token "$(cat "$s")" "$(basename "$(dirname "$s")")"
+        done
+        for p in "$LOG_DIR"/*/pid; do
+            [ -f "$p" ] && kill_tree "$(cat "$p")"
+        done
+        rm -rf "${LOCK_DIR:-}"
+    }
+    trap cleanup INT TERM EXIT
 
     local -a cases=()
     while IFS= read -r c; do cases+=("$c"); done < <(discover_cases)

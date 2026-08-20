@@ -464,8 +464,11 @@ The output is a single JSON object. Output ONLY that JSON object.`,
 
         let start = bodyOffset + 1;
         let iter = 0;
+        let stall = 0;
         const MAX_ITER = 60;
+        let stalled = false;
         while (start <= bodyTotal && iter < MAX_ITER) {
+          const prevStart = start;
           const startIdx = start - bodyOffset - 1;
           const remaining = bodyLines.slice(startIdx).join('\n');
           const r = parseJsonOutput(await agent(
@@ -496,16 +499,46 @@ Return ONLY a JSON object:
             sentences: lines,
           });
           start = Math.min(bodyTotal, effEnd) + 1;
+          if (start <= prevStart) {
+            // 硬约束：effEnd 未推进 start（agent 无新产出）→ 停滞计数；连续 3 轮终止，
+            // 防止切块 agent 反复无产出造成 session 风暴。
+            stall += 1;
+            log(`[${caseName}] Phase 0 切块停滞 ${stall} 轮（start=${prevStart}）`);
+            if (stall >= 3) { stalled = true; break; }
+          } else {
+            stall = 0;
+          }
           iter += 1;
         }
-        return { unit: 'trigger-block', count: blocks.length, blocks };
+        return { unit: 'trigger-block', count: blocks.length, blocks, stalled };
       } catch (e) {
         log(`[${caseName}] Phase 0 chunking failed: ${e}`);
         return { unit: 'trigger-block', count: 0, blocks: [] };
       }
     })();
     const blocks = phase0.blocks || [];
+    // 每块提取引用的脚本名（det 静态证据按脚本名归因到这些块）
+    const SCRIPT_RE = /(?:scripts|\/scripts)\/([\w.-]+\.(?:py|js|ts|sh|mjs|cjs|ps1|bat))/gi;
+    for (const b of blocks) {
+      b.scripts = [];
+      const re = new RegExp(SCRIPT_RE.source, 'gi');
+      let m;
+      while ((m = re.exec(b.text || ''))) b.scripts.push(m[1]);
+    }
     log(`[${caseName}] Phase 0 blocks: ${blocks.length}`);
+
+    // 切块停滞硬约束：连续 3 轮无新块 → 终止该 case（防 session 风暴），返回 error 结果
+    if (phase0.stalled) {
+      log(`[${caseName}] Phase 0 切块停滞，终止该 case（防 session 风暴）`);
+      return {
+        case: caseName, case_dir: caseDir, class: deriveClass(caseDir),
+        skill_name: skillName,
+        verdict: 'error', verdict_source: 'phase0-stalled',
+        reasoning: 'phase0 stalled: no new block in 3 rounds',
+        error: 'phase0 stalled',
+        phase0: { unit: 'trigger-block', count: blocks.length, blocks },
+      };
+    }
 
     // --- V_decl: block-level malicious classification (no-deviation-malicious) ---
     log(`[${caseName}] Running V_decl block-level classification...`);
@@ -573,7 +606,8 @@ Return ONLY a JSON object:
     // Long skills are classified in chunks by BLOCK count; a single
     // StructuredOutput retry-caps on ~250 rows. Blocks carry real global
     // block_id, so each chunk needs no offset — results merge by block_id.
-    const VDECL_CHUNK = 120;
+    // VDECL_CHUNK=40: 单批 prompt/输出体积控制（120 对长文本仍过大导致 retry 超限）。
+    const VDECL_CHUNK = 40;
     const chunks = [];
     for (let i = 0; i < blocks.length; i += VDECL_CHUNK) {
       chunks.push(blocks.slice(i, i + VDECL_CHUNK));
@@ -591,24 +625,28 @@ VARS_JSON`,
       );
     };
 
-    let vdeclResult = null;
-    if (chunks.length <= 1) {
-      const vdeclPrompt = await renderVdeclPrompt(blocks, 0);
-      vdeclResult = await agent(
-        vdeclPrompt,
-        { label: `vdecl_classifier-${caseName}`, phase: 'Audit', schema: VDECL_SCHEMA }
-      );
-    } else {
-      // Multi-chunk: one agent per block subset, merge by block_id (dedup).
-      const chunkResults = await Promise.all(chunks.map(async (chunk, idx) => {
-        const prompt = await renderVdeclPrompt(chunk, idx);
+    // 单批分类 helper：render → agent(schema)。单批失败重试 2 次。
+    // 主分批与 backfill 分批共用（E1：backfill 不再逐块，按批补测）。
+    const classifyBlockChunk = async (chunk, idx, labelPrefix, phaseLabel) => {
+      const prompt = await renderVdeclPrompt(chunk, idx);
+      for (let t = 0; t < 2; t++) {
         const r = await agent(
           prompt,
-          { label: `vdecl_classifier-${caseName}-${idx}`, phase: 'Audit', schema: VDECL_SCHEMA }
+          { label: `${labelPrefix}-${caseName}-${idx}${t ? '-r' + t : ''}`, phase: phaseLabel, schema: VDECL_SCHEMA }
         );
-        log(`[${caseName}] vdecl chunk ${idx + 1}/${chunks.length}: ${r ? (r.block_classifications || []).length : 0} blocks`);
-        return r;
-      }));
+        if (r) return r;
+        log(`[${caseName}] V_decl chunk ${idx} attempt ${t + 1} failed, retrying...`);
+      }
+      return null;
+    };
+
+    let vdeclResult = null;
+    if (chunks.length <= 1) {
+      vdeclResult = await classifyBlockChunk(blocks, 0, 'vdecl_classifier', 'Audit');
+    } else {
+      // Multi-chunk: one agent per block subset, merge by block_id (dedup).
+      const chunkResults = await Promise.all(chunks.map((chunk, idx) =>
+        classifyBlockChunk(chunk, idx, 'vdecl_classifier', 'Audit')));
       const merged = chunkResults.filter(Boolean);
       const byId = {};
       for (const r of merged) {
@@ -625,115 +663,231 @@ VARS_JSON`,
       };
     }
 
-    // --- coverage 校验：缺失块补测 ---
-    // vdecl 可能漏标部分块（LLM 输出不完整）。对缺失 block_id 单独补测并合并，
-    // 确保 phase0 每个块都有分类（前端未标注块灰底 = 数据缺失，应避免）。
-    const classifiedIds = new Set((vdeclResult?.block_classifications || []).map(c => c.block_id));
-    const missingBlocks = blocks.filter(b => !classifiedIds.has(b.block_id));
-    if (missingBlocks.length > 0) {
-      log(`[${caseName}] vdecl missing ${missingBlocks.length} block(s), backfilling...`);
-      const backfillResults = await Promise.all(missingBlocks.map(async (mb, idx) => {
-        const vars = { ...vdeclVars, blocks: [mb] };
-        const prompt = await agent(
-          `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
-
-python scripts/prompt_render.py sentence_classifier --skill-dir ${caseDir} --variant batch <<'VARS_JSON'
-${JSON.stringify(vars)}
-VARS_JSON
-
-Return ONLY the rendered prompt text.`,
-          { label: `render-vdecl-backfill-${caseName}-${idx}` }
-        );
-        return agent(
-          prompt,
-          { label: `vdecl_backfill-${caseName}-${idx}`, phase: 'Audit', schema: VDECL_SCHEMA }
-        );
-      }));
-      const bf = backfillResults.filter(Boolean);
-      const byId = {};
-      for (const c of (vdeclResult?.block_classifications || [])) {
-        if (c && typeof c.block_id === 'number') byId[c.block_id] = c;
-      }
-      for (const r of bf) {
+    // --- coverage 校验：缺失块按批补测，迭代收敛（≤3 轮）---
+    // E1：由"逐块 backfill"改为按 VDECL_CHUNK 分批（每批一次 agent，复用 classifyBlockChunk），
+    // 补测后重算缺失；≤3 轮收敛、无进展即停，避免 696 次逐块调用造成卡死与 session 风暴。
+    const _byId = {};
+    for (const c of (vdeclResult?.block_classifications || [])) {
+      if (c && typeof c.block_id === 'number') _byId[c.block_id] = c;
+    }
+    let _missing = blocks.filter(b => !_byId[b.block_id]);
+    let _bfUncond = [...(vdeclResult?.unconditional_harmful || [])];
+    for (let round = 0; round < 3 && _missing.length > 0; round++) {
+      const bfChunks = [];
+      for (let i = 0; i < _missing.length; i += VDECL_CHUNK) bfChunks.push(_missing.slice(i, i + VDECL_CHUNK));
+      log(`[${caseName}] vdecl backfill round ${round + 1}: ${_missing.length} missing -> ${bfChunks.length} chunk(s)`);
+      const results = await Promise.all(bfChunks.map((chunk, i) =>
+        classifyBlockChunk(chunk, i, `vdecl-backfill-${round}`, 'Audit')));
+      for (const r of results.filter(Boolean)) {
         for (const c of (r.block_classifications || [])) {
-          if (c && typeof c.block_id === 'number') byId[c.block_id] = c;
+          if (c && typeof c.block_id === 'number') _byId[c.block_id] = c;
         }
+        _bfUncond.push(...(r.unconditional_harmful || []));
       }
-      const sorted = Object.keys(byId).map(Number).sort((a, b) => a - b).map(k => byId[k]);
-      const uncond = [...(vdeclResult?.unconditional_harmful || []),
-        ...bf.flatMap(r => r.unconditional_harmful || [])].filter(h => h && h.pattern);
-      vdeclResult = {
-        block_classifications: sorted,
-        unconditional_harmful: uncond,
-        coverage: { total_blocks: blocks.length, classified_blocks: sorted.length },
-      };
-      log(`[${caseName}] vdecl backfilled: ${sorted.length}/${blocks.length} blocks`);
+      const _next = blocks.filter(b => !_byId[b.block_id]);
+      if (_next.length >= _missing.length) break;   // 无进展 → 停止，避免死循环
+      _missing = _next;
+    }
+    const sorted = Object.keys(_byId).map(Number).sort((a, b) => a - b).map(k => _byId[k]);
+    const uncond = _bfUncond.filter(h => h && h.pattern);
+    vdeclResult = {
+      block_classifications: sorted,
+      unconditional_harmful: uncond,
+      coverage: { total_blocks: blocks.length, classified_blocks: sorted.length },
+    };
+    if (_missing.length) log(`[${caseName}] vdecl 仍有 ${_missing.length} 块未能覆盖（尽力而为，前端将灰底显示）`);
+    else log(`[${caseName}] vdecl coverage 完整: ${sorted.length}/${blocks.length} blocks`);
+
+    // B3：unconditional_harmful 硬校验——命中必须对应 action_instruction 块、
+    // 不与块级分类自相矛盾、且非惰性 markdown 引用（图片/链接且无执行动词）。
+    const _EXEC_VERBS = /\b(curl|wget|fetch|Invoke-WebRequest|exec|spawn|Popen|subprocess|child_process|download|pip install|npm install|chmod|bash\s+-c|sh\s+-c|eval\(|system\(|Start-Process|Install-Module)\b/i;
+    const _isInertReference = (text) => {
+      const t = String(text || '');
+      if (!/!?\[[^\]]*\]\([^)]*\)/.test(t)) return false;   // 无链接/图片语法 → 不豁免
+      return !_EXEC_VERBS.test(t);                          // 无执行动词 → 惰性引用，豁免
+    };
+    function filterUnconditionalHits(hits, p0blocks, classifs) {
+      const clsById = new Map((classifs || [])
+        .filter(c => c && typeof c.block_id === 'number').map(c => [c.block_id, c]));
+      return (hits || []).filter(h => {
+        if (!h || !h.pattern) return false;
+        if (typeof h.block_id !== 'number') return true;    // 无 block_id → 保守保留
+        const cls = clsById.get(h.block_id);
+        const blk = (p0blocks || []).find(b => b.block_id === h.block_id);
+        if (cls && cls.kind === 'non_action') return false; // ① non_action 不参与 U
+        if (blk && blk.kind === 'non_action') return false;
+        if (cls && cls.malicious_label === 'benign') return false; // ② 与块级分类矛盾
+        if (blk && _isInertReference(blk.text)) return false;     // ③ 惰性引用豁免
+        return true;
+      });
     }
 
-    const vdeclHits = (vdeclResult?.unconditional_harmful || []).filter(h => h && h.pattern);
+    const vdeclHits = filterUnconditionalHits(
+      vdeclResult?.unconditional_harmful || [], blocks, vdeclResult?.block_classifications || []);
     const vdeclFired = vdeclHits.length > 0;
     const vdeclNoDevMal = (vdeclResult?.block_classifications || [])
       .filter(s => s && s.classification === 'no-deviation-malicious').length;
 
-    const judgeEvidenceSummary = `${detSummary}
+    // 静态 det → block 级命中：SKILL.md 内证据直接对位；scripts/* 证据按 block.scripts 脚本名归因。
+    function buildDetBlockHits(detFull, blocks) {
+      const cce = (detFull && detFull.phase1 && detFull.phase1.capability_code_evidence) || {};
+      const hits = [];
+      for (const cap of Object.keys(cce)) {
+        for (const loc of (cce[cap].locations || [])) {
+          const f = String(loc.file || '');
+          if (f.toLowerCase().includes('skill.md') && loc.line_start) {
+            const blk = blocks.find(b => typeof b.line_start === 'number' && typeof b.line_end === 'number'
+              && loc.line_start >= b.line_start && loc.line_start <= b.line_end);
+            if (blk) hits.push({ block_id: blk.block_id, capability: cap, source: 'skill-md', evidence: loc });
+            continue;
+          }
+          const scriptName = f.split(/[\\/]/).pop();
+          if (scriptName) {
+            for (const b of blocks) {
+              if ((b.scripts || []).includes(scriptName))
+                hits.push({ block_id: b.block_id, capability: cap, source: 'script:' + scriptName, evidence: loc });
+            }
+          }
+        }
+      }
+      return hits;
+    }
+    let detBlockHits = buildDetBlockHits(detFull, blocks);
+    // 三级兜底：det 判恶意但无任何块命中 → 首个 action_instruction 块（保证 det 恶意必有 block）
+    if (detBlockHits.length === 0 && detFull?._det_verdict?.verdict === 'malware') {
+      const firstAction = (vdeclResult?.block_classifications || []).find(c => c.kind === 'action_instruction');
+      if (firstAction && typeof firstAction.block_id === 'number') {
+        detBlockHits = [{ block_id: firstAction.block_id, capability: null, source: 'det-fallback', evidence: null }];
+      }
+    }
+    log(`[${caseName}] det_block_hits: ${detBlockHits.length} (det_verdict=${detFull?._det_verdict?.verdict || '?'})`);
 
-## Declared Capabilities (semantic extraction):
-${declaredSummary}
+    // --- LLM Judge：逐块审计（审计对象 = 块审计信息；全局结论由 block 归约，禁止直接出全局 verdict）---
+    log(`[${caseName}] Running LLM Judge (block-level audit)...`);
 
-## Instruction-Level Analysis:
-${instructionSummary}
-Analysis summary: ${aLlmInstrResult?.analysis_summary || 'none'}
+    const JUDGE_SCHEMA = {
+      type: 'object',
+      properties: {
+        block_judgments: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              block_id: { type: 'integer' },
+              verdict: { type: 'string', enum: ['benign', 'malicious'] },
+              intent_category: { type: 'string' },
+              confidence: { type: 'number' },
+              reasoning: { type: 'string' },
+            },
+            required: ['block_id', 'verdict', 'reasoning'],
+          },
+        },
+      },
+      required: ['block_judgments'],
+    };
 
-## V_decl 声明轨道恶意通道（块级分类 — 无偏差恶意识别）
-${vdeclHits.length
-    ? vdeclHits.map(h => `- [!] ${h.pattern}: "${h.evidence}" (block ${h.block_id}, anchor: ${h.anchor})`).join('\n')
-    : 'no unconditional-harmful declaration detected'}
-no-deviation-malicious 块数: ${vdeclNoDevMal}`;
-
-    const judgePrompt = await agent(
+    // 每块的审计信息：text(截断) + vdecl 标注 + det 命中 + scripts；D/A/U/O 仅作全局上下文
+    const judgeVars = { skill_name: skillName, D: vdeclVars.D, A: vdeclVars.A, U: vdeclVars.U, O: vdeclVars.O };
+    const buildJudgeChunk = (blockSubset) => ({
+      ...judgeVars,
+      blocks: blockSubset.map(b => {
+        const cls = (vdeclResult?.block_classifications || []).find(c => c.block_id === b.block_id);
+        const uHit = vdeclHits.find(h => h.block_id === b.block_id);
+        const dets = detBlockHits.filter(h => h.block_id === b.block_id);
+        return {
+          block_id: b.block_id,
+          text: String(b.text || '').slice(0, 600),
+          scripts: b.scripts || [],
+          kind: (cls && cls.kind) || null,
+          vdecl_classification: (cls && cls.classification) || null,
+          vdecl_capabilities: (cls && cls.capabilities) || [],
+          core_instruction: (cls && cls.core_instruction) || '',
+          unconditional_harmful: uHit ? { pattern: uHit.pattern, evidence: uHit.evidence } : null,
+          det_hits: dets.map(d => ({ capability: d.capability, source: d.source })),
+        };
+      }),
+    });
+    const renderJudgePrompt = (blockSubset, idx) => agent(
       `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
 
 python scripts/prompt_render.py judge --skill-dir ${caseDir} --variant batch <<'VARS_JSON'
-${JSON.stringify({ evidence_summary: judgeEvidenceSummary })}
+${JSON.stringify(buildJudgeChunk(blockSubset))}
 VARS_JSON`,
-      { label: `render-judge-prompt-${caseName}` }
+      { label: `render-judge-prompt-${caseName}${judgeChunks.length > 1 ? '-' + idx : ''}` }
     );
-
-    const judgeResult = await agent(
-      judgePrompt,
-      {
-        label: `judge-${caseName}`,
-        phase: 'Audit',
-        effort: 'xhigh',
-        schema: {
-          type: 'object',
-          properties: {
-            verdict: { type: 'string', enum: ['benign', 'malware'] },
-            confidence: { type: 'number' },
-            reasoning: { type: 'string' },
-            intent_category: { type: 'string', enum: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] },
-            key_evidence: { type: 'array', items: { type: 'string' } },
-          },
-          required: ['verdict', 'confidence', 'reasoning', 'intent_category', 'key_evidence'],
-        },
+    const classifyJudgeChunk = async (chunk, idx) => {
+      const prompt = await renderJudgePrompt(chunk, idx);
+      for (let t = 0; t < 2; t++) {
+        const r = await agent(prompt, {
+          label: `judge-${caseName}-${idx}${t ? '-r' + t : ''}`,
+          phase: 'Audit', effort: 'xhigh', schema: JUDGE_SCHEMA,
+        });
+        if (r) return r;
+        log(`[${caseName}] judge chunk ${idx} attempt ${t + 1} failed, retrying...`);
       }
-    );
+      return null;
+    };
+    const judgeChunks = [];
+    for (let i = 0; i < blocks.length; i += VDECL_CHUNK) judgeChunks.push(blocks.slice(i, i + VDECL_CHUNK));
+    const judgeResults = await Promise.all(judgeChunks.map((chunk, idx) => classifyJudgeChunk(chunk, idx)));
+    const judgeById = {};
+    for (const r of judgeResults.filter(Boolean)) {
+      for (const j of (r.block_judgments || [])) {
+        if (j && typeof j.block_id === 'number') judgeById[j.block_id] = j;
+      }
+    }
+    const judgeMissingCount = blocks.filter(b => !judgeById[b.block_id]).length;
+    if (judgeMissingCount) log(`[${caseName}] Judge 缺 ${judgeMissingCount} 个块的判定（对应 block_verdicts.judge=null）`);
+    const judgeResult = { block_judgments: Object.values(judgeById) };
+    log(`[${caseName}] Judge 逐块完成: ${judgeResult.block_judgments.length} 个块的判定`);
 
-    log(`[${caseName}] VERDICT: ${judgeResult?.verdict} (${((judgeResult?.confidence || 0) * 100).toFixed(0)}%)`);
+    // ---------------------------------------------------------------------------
+    // Phase 3 汇总：三路 block 级判定 → block_verdicts → 全局 verdict（简单规则）
+    //   原则：任何阶段都不直接产全局 verdict；全局结论 = 存在恶意 block 则全局恶意。
+    // ---------------------------------------------------------------------------
+    const blockVerdicts = blocks.map(b => {
+      const cls = (vdeclResult?.block_classifications || []).find(c => c.block_id === b.block_id);
+      const uHit = vdeclHits.find(h => h.block_id === b.block_id);
+      const dets = detBlockHits.filter(h => h.block_id === b.block_id);
+      const jg = judgeById[b.block_id];
+      const sources = [];
+      if (dets.length) sources.push('det');
+      if (uHit || (cls && String(cls.classification || '').includes('malicious'))) sources.push('vdecl');
+      if (jg && jg.verdict === 'malicious') sources.push('judge');
+      return {
+        block_id: b.block_id,
+        text: b.text,
+        scripts: b.scripts || [],
+        det: dets.length ? dets : null,
+        vdecl: uHit
+          ? { pattern: uHit.pattern }
+          : (cls && String(cls.classification).includes('malicious') ? { classification: cls.classification } : null),
+        judge: jg
+          ? { verdict: jg.verdict, intent_category: jg.intent_category || null, reasoning: jg.reasoning || '', confidence: jg.confidence || null }
+          : null,
+        is_malicious: sources.length > 0,
+        sources,
+      };
+    });
+    const maliciousBlocks = blockVerdicts.filter(v => v.is_malicious);
+    const verdict = maliciousBlocks.length > 0 ? 'malware' : 'benign';
+    const verdict_source = maliciousBlocks.length > 0 ? maliciousBlocks[0].sources[0] : 'llm_judge';
+    const verdictReasoning = maliciousBlocks.length > 0
+      ? `共 ${maliciousBlocks.length} 个恶意块: ${maliciousBlocks.slice(0, 5).map(v => `block ${v.block_id}(${(v.sources || []).join('+')})`).join(', ')}${maliciousBlocks.length > 5 ? '...' : ''}`
+      : '无恶意块（三路 block 判定均为 benign）';
+    log(`[${caseName}] Phase 3 汇总: ${blockVerdicts.length} 块, ${maliciousBlocks.length} 恶意块, verdict=${verdict} (source=${verdict_source})`);
 
     // --- Phase 4: malicious attack chain construction (per malicious block) ---
     // For each malicious block, a subagent builds user_input (trigger) + flow_items
     // (the actual malicious code snippets from capability_code_evidence).
     log(`[${caseName}] Phase 4: constructing malicious attack chains...`);
     const attackChains = [];
-    const maliciousBlocks = (vdeclResult?.block_classifications || [])
-      .filter(b => b && b.classification && b.classification.includes('malicious'));
     if (maliciousBlocks.length > 0) {
       const cce = (detFull?.phase1?.capability_code_evidence) || {};
       const chainResults = await Promise.all(maliciousBlocks.map(async (mb, idx) => {
-        // 精简 vars：block.text 截短、code_evidence 只保留该块涉及的能力，
-        // 避免超长 heredoc 在 subagent 执行时损坏（曾导致 block 字段丢失）。
-        const capsOfBlock = mb.capabilities || [];
+        // mb 是 block_verdicts 项：capabilities/classification 从 vdecl 块分类回溯
+        const cls = (vdeclResult?.block_classifications || []).find(c => c.block_id === mb.block_id);
+        const capsOfBlock = (cls && cls.capabilities) || [];
         const cceFiltered = {};
         for (const cap of capsOfBlock) {
           if (cce[cap]) cceFiltered[cap] = cce[cap];
@@ -743,9 +897,10 @@ VARS_JSON`,
         const chainVars = {
           block: {
             block_id: mb.block_id,
-            trigger_condition: mbTrigger || mb.trigger_condition || '',
-            classification: mb.classification || '',
+            trigger_condition: mbTrigger || '',
+            classification: (mb.vdecl && mb.vdecl.classification) || (cls && cls.classification) || 'deviated-malicious',
             capabilities: capsOfBlock,
+            sources: mb.sources || [],
             text: (mb.text || '').slice(0, 600),
           },
           code_evidence: cceFiltered,
@@ -800,12 +955,22 @@ Return ONLY the rendered prompt text.`,
       case_dir: caseDir,
       class: deriveClass(caseDir),
       skill_name: skillName,
-      verdict: vdeclFired ? 'malware' : (judgeResult?.verdict || 'error'),
-      confidence: vdeclFired ? Math.max(0.9, judgeResult?.confidence || 0) : (judgeResult?.confidence || 0),
-      reasoning: judgeResult?.reasoning || '',
-      intent_category: judgeResult?.intent_category || 'H',
-      intent_category_name: INTENT_NAMES[judgeResult?.intent_category] || '',
-      key_evidence: judgeResult?.key_evidence || [],
+      // 全局结论 = 简单规则：存在恶意 block 则全局恶意（Phase 3 三路 block 判定归约）
+      verdict,
+      verdict_source,
+      confidence: maliciousBlocks.length > 0 ? 0.9 : 0,
+      reasoning: verdictReasoning,
+      intent_category: (() => {
+        const fm = maliciousBlocks.find(v => v.judge && v.judge.verdict === 'malicious');
+        return (fm && fm.judge.intent_category) || 'H';
+      })(),
+      intent_category_name: (() => {
+        const fm = maliciousBlocks.find(v => v.judge && v.judge.verdict === 'malicious');
+        return INTENT_NAMES[(fm && fm.judge.intent_category) || 'H'] || '';
+      })(),
+      key_evidence: (judgeResult?.block_judgments || [])
+        .filter(j => j.verdict === 'malicious')
+        .map(j => `block ${j.block_id}: ${String(j.reasoning || '').slice(0, 120)}`),
       d_llm_count: dCaps.length,
       d_llm_caps: dCaps,
       // A_llm: 真实执行的所有敏感操作（完整能力，非仅恶意指令）
@@ -833,6 +998,10 @@ Return ONLY the rendered prompt text.`,
         no_deviation_malicious_count: vdeclNoDevMal,
         coverage: vdeclResult?.coverage || {},
       },
+      // Phase 3: block 级三路判定汇总（det / vdecl / judge）— Phase 4 与前端消费
+      block_verdicts: blockVerdicts,
+      det_block_hits: detBlockHits,
+      judge: judgeResult,   // { block_judgments: [...] }
       // Phase 4: 恶意调用链（每个恶意块 → 构造触发输入 + 恶意代码片段）
       attack_chains: attackChains,
       // Phase 0: structured blocks (downstream annotation units)

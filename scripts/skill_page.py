@@ -397,7 +397,7 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
   .card .v {{ font-size: 13px; }}
   .card .flow-item {{ font-family: Consolas, monospace; font-size: 12px; background: #f6f8fa; padding: 6px 8px; border-radius: 4px; margin: 3px 0; }}
   .badge {{ display: inline-block; padding: 2px 10px; border-radius: 12px; color: #fff; font-size: 12px; margin-right: 6px; }}
-  .badge.malware {{ background: #d62728; }} .badge.benign {{ background: #2ca02c; }}
+  .badge.malware {{ background: #d62728; }} .badge.benign {{ background: #2ca02c; }} .badge.error {{ background: #999; }}
   .badge.deviated {{ background: #ff7f0e; }} .badge.no_deviation {{ background: #2ca02c; }}
   .cap-tag {{ display: inline-block; background: #eee; border-radius: 10px; padding: 1px 8px; font-size: 12px; margin: 2px 2px 0 0; }}
   .muted {{ color: #aaa; font-size: 12px; }}
@@ -478,7 +478,7 @@ def _build_page(name: str, items: list, verdict: str, quadrant: str,
 <header>
   <h1>{html_escape(name)}</h1>
   <div class="meta">
-    <span class="badge {'malware' if verdict == 'malware' else 'benign'}">{html_escape(verdict)}</span>
+    <span class="badge {'malware' if verdict == 'malware' else ('error' if verdict == 'error' else 'benign')}">{html_escape(verdict)}</span>
   </div>
   <div class="legend">{legend}</div>
   {capspace}

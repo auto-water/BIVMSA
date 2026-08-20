@@ -36,7 +36,8 @@
                   "line_end": { "type": "integer" },
                   "trigger_condition": { "type": "string" },
                   "text": { "type": "string" },
-                  "sentences": { "type": "array", "items": { "type": "string" } }
+                  "sentences": { "type": "array", "items": { "type": "string" } },
+                  "scripts": { "type": "array", "items": { "type": "string" } }
                 }
               }
             }
@@ -248,6 +249,35 @@
             "verdict": { "enum": ["benign", "malware"] },
             "confidence": { "type": "number" },
             "source": { "type": "string" }
+          }
+        },
+        "det_block_hits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "block_id": { "type": "integer" },
+              "capability": { "type": "string" },
+              "source": { "type": "string" },
+              "evidence": { "type": "object" }
+            }
+          }
+        },
+        "block_verdicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["block_id", "is_malicious", "sources"],
+            "properties": {
+              "block_id": { "type": "integer" },
+              "text": { "type": "string" },
+              "scripts": { "type": "array", "items": { "type": "string" } },
+              "det": { "type": "array", "items": { "type": "object" } },
+              "vdecl": { "type": "object" },
+              "judge": { "type": "object" },
+              "is_malicious": { "type": "boolean" },
+              "sources": { "type": "array", "items": { "type": "string" } }
+            }
           }
         },
         "classification": {
