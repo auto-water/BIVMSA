@@ -51,7 +51,11 @@ BIVMSA（Behavior Integrity Verification for Malicious Skill Audit，恶意 Skil
 
 **输出**：`benign`（良性，可上架）或 `malware`（恶意，拒绝上架）的判定，附带完整证据链：声明能力 D(s)、实际能力 A(s)、偏差 U/O、数据流、复合威胁标志、根因分类、逐块恶意标注、攻击链，以及结构化调试追踪（trace）。
 
-**核心思想**：一个 Skill 是否恶意，不取决于它"看起来做了危险的事"，而取决于它**声明做什么**与**实际做什么**是否一致，以及**意图覆盖之外的行为**是否有害。系统用一条确定性管线 + 一个 LLM 增强管线双轨协同，在**可审计**与**语义理解**之间取得平衡。
+**核心思想**：一个 Skill 是否恶意，不取决于它"看起来做了危险的事"——**高权限原子指令 / 提示词片段（`curl`、`exec`、高权限 I/O、提示词注入、图片/链接引用）单独出现是中性工具，直接以"敏感性"判恶意即产生系统性误报（FP）**。系统的判定基于**偏差分析建模**：比较声明能力 D(s) 与实际能力 A(s)，遵循核心原则——
+
+> **敏感指令本身不可判恶意；但声明之外出现的敏感指令，是强恶意候选。**
+
+即：声明能力内的敏感指令视为合理功能；**声明之外（未声明能力 U(s)）出现的敏感指令才是恶意判定的强信号**。判定**逐块（block）**进行，全局结论由简单规则归约（存在恶意 block 则全局恶意）。系统用一条确定性管线 + 一个 LLM 增强管线双轨协同，在**可审计**与**语义理解**之间取得平衡。
 
 ---
 
@@ -68,6 +72,16 @@ AI Agent Skill 是一种可被 Agent 自动加载并执行的"指令包"。攻�
 - 用户（或市场）在审核时，往往只能看到声明，看不到执行细节。
 
 因此，静态"危险代码扫描"远远不够：一个良性密码管理器同样会读凭证、一个良性下载工具同样会发起网络请求。**行为完整性**的视角是：**它声明的，是不是它实际做的？没声明的部分，是不是无条件的伤害？**
+
+**误报陷阱（本系统针对的问题）**：高权限原子指令 / 提示词片段在良性 skill 中大量存在——`curl`/`wget` 下载（更新/安装功能）、`subprocess`/`exec`（脚手架）、读 `~/.ssh`（凭证管理）、`ignore previous instructions`（越狱测试文档）、markdown 链接/图片（展示性引用）。若以"指令敏感性"直接判恶意，会产生**系统性误报**。系统引入**偏差分析建模**：把"指令是否敏感"替换为"**敏感指令是否出现在声明之外**"。
+
+**核心原则**：
+
+> **敏感指令本身不可判恶意；但声明之外出现的敏感指令，是强恶意候选。**
+
+1. **声明内敏感指令 → 良性候选**：`curl`/`exec` 被声明能力覆盖（`covered_by_declared == true`），视为合理功能，不构成恶意证据；
+2. **声明外敏感指令 → 强恶意候选**：同一指令未被声明覆盖（进入 U(s)），构成偏差，是恶意判定的强信号；
+3. **判定逐块归约**：任何阶段都不直接产出全局结论；全局 verdict = 存在恶意 block 则 malware。
 
 ### 1.2 双轨验证
 
@@ -95,30 +109,26 @@ O(s) = D(s) − A(s)   过度声明/过规格（声明了但没做 → 无害冗
 - **flows**：数据流三元组 `{source, source_location, transforms, sink, sink_location}`，记录"哪个能力的数据流到了哪个能力"；
 - **compound**：4 位复合威胁标志（`exfiltration_chain` / `rce_chain` / `code_obfuscation` / `data_lineage_violation`），表示多条能力的**组合**构成威胁。
 
-### 1.4 三层判定（ŷ 的构成）
+### 1.4 三路块级判定（block_verdicts → 全局简单规则）
 
-最终判定由三个通道**或（∨）**组合：
+判定由三个通道构成，**每一路都以 block 为单位产出判定**，任何通道都不直接出全局结论：
+
+| 通道 | 审计对象 | 产出 | 依据 |
+|------|---------|------|------|
+| **V_actual（det）** | 确定性证据 → block | `det_block_hits[{block_id, capability, source}]` | Relaxed-Veto / 规则引擎判恶意时，SKILL.md 证据按行号直接对位 block，`scripts/*` 证据按 `block.scripts` 脚本名归因；三级兜底保证"det 判恶意必有 block" |
+| **V_decl（vdecl）** | block 的 SKILL.md 原文 | `unconditional_harmful[{block_id, pattern}]` + `block_classifications`（2×2） | U1–U8 无条件有害模式；仅 `action_instruction` 块参与，经"非 action / 与块级分类矛盾 / 惰性 markdown 引用"硬校验清洗 |
+| **Judge** | 块审计信息（text + vdecl 标注 + det 命中 + scripts） | `block_judgments[{block_id, verdict, intent, reasoning}]` | LLM 逐块审计全部块（按块分批），审计对象 = 块审计信息而非全局文本 |
+
+**Phase 3 汇总**：三路合并为 `block_verdicts[]`（每块 `is_malicious` = 任一路命中，`sources` 记录来源），交给 Phase 4 与前端消费。
+
+**全局 verdict = 简单规则**：
 
 ```
-ŷ(s) = V_actual(s) ∨ V_decl(s) ∨ Judge(s)
+verdict       = 存在恶意 block ? "malware" : "benign"
+verdict_source = 首个恶意块的来源（det | vdecl | judge）；全 benign → "llm_judge"
 ```
 
-| 通道 | 触发条件 | 性质 | verdict_source |
-|------|---------|------|---------------|
-| **V_actual** | 确定性硬否决（Relaxed-Veto）：任一复合威胁标志命中 **且** U 中存在风险 ≥ High 的未声明能力 | 确定性、无参数、可审计 | `relaxed_veto` |
-| **V_decl** | 声明轨道恶意通道：某块声明的动作本身**无条件有害**（U1–U8 命中），不看上下文 | LLM 语义判定、命中即恶意 | `vdecl` |
-| **Judge** | LLM 最终法官：以 Φ(s) 证据 + V_decl 命中 + skill 原文为输入，给出二元判定 | LLM、最强推理 | `llm_judge` |
-
-组合规则（`final_verdict`）：
-
-| V_actual 触发 | Judge 判定 | 结果 | 置信度 |
-|:---:|:---:|------|------|
-| ✓ | malware | `malware`（`both`） | `max(0.95, llm_conf)` |
-| ✓ | benign | `malware`（`relaxed_veto`，**否决覆盖 LLM**） | 0.90 |
-| ✗ | malware | `malware`（`llm_judge`） | `llm_conf` |
-| ✗ | benign | `benign`（`llm_judge`） | `llm_conf` |
-
-V_decl 命中时，`verdict` 直接置为 `malware`、`verdict_source='vdecl'`、`confidence = max(0.9, judge_conf)`。
+**任何阶段都不直接产出全局结论**——全局判定只是块级结果的归约。原"V_actual 否决覆盖 LLM / V_decl 命中即全局 malware"的组合规则被取代。
 
 ### 1.5 Taxonomy：能力分类体系（论文内核）
 
@@ -139,10 +149,10 @@ V_decl 命中时，`verdict` 直接置为 `malware`、`verdict_source='vdecl'`�
 ### 1.6 三阶段 + 零阶段 + 攻击链的流水线
 
 ```
-Phase 0  块划分      SKILL.md → 触发条件块（后续所有标注的基本单元）
+Phase 0  两层分块    SKILL.md → 触发 Entry（partition）→ 原子 Action（action_extract）
 Phase 1  能力提取     D(s) 声明轨 + A(s) 实际轨 → 能力集合 + 数据流
 Phase 2  偏差检测     U/O、compound flags、Φ(s) → 偏差状态
-Phase 3  恶意审计     ŷ = V_actual ∨ V_decl ∨ Judge → 判定 + 根因
+Phase 3  恶意审计     三路（det / vdecl / judge）逐块判定 → block_verdicts → 全局简单规则
 Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 ```
 
@@ -214,7 +224,7 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 | U(s) | Undeclared | 未声明能力（`covered_by_declared==false`，非严格集合差） |
 | O(s) | Overdeclared | 过度声明能力（`D − A`） |
 | Φ(s) | Phi | 偏差状态向量 `⟨D, A, U, O, flows, compound⟩` |
-| ŷ | final verdict | 最终判定 `V_actual ∨ V_decl ∨ Judge` |
+| ŷ | final verdict | 全局结论 = 简单规则：存在恶意 block 则 malware（三路 det/vdecl/judge 逐块判定归约） |
 | V_actual | Relaxed-Veto | 确定性硬否决（compound ∧ 高危未声明） |
 | V_decl | 声明轨道恶意 | U1–U8 无偏差恶意识别 |
 | Judge | LLM Judge | 最终二元法官 |
@@ -224,7 +234,7 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 
 | 术语 | 含义 |
 |------|------|
-| Phase 0 | 块划分：把 SKILL.md 切成触发条件块 |
+| Phase 0 | 两层分块：partition 切触发 Entry → action_extract 切原子 Action |
 | Phase 1 | 能力提取：D/A 双轨 |
 | Phase 2 | 偏差检测：U/O、compound、Φ(s) |
 | Phase 3 | 恶意审计：三层判定 + 根因分类 |
@@ -234,7 +244,7 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 
 | 术语 | 含义 |
 |------|------|
-| trigger-condition block | 触发条件块：同一触发条件下执行的最大行区间（Phase 0 产物） |
+| action block | 原子操作块：fenced 代码块=1 / 祈使句=1（Phase 0 第二层产物，带所属 Entry 触发条件） |
 | block_id | 块全局编号（后续所有标注以块为单位，替代"句"） |
 | action_instruction / non_action | 块分类：动作指令块 / 非动作块 |
 | 2×2 classification | 四象限分类：no/deviation × benign/malicious |
@@ -315,10 +325,10 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 
 ```mermaid
 flowchart TD
-    IN["SKILL.md 目录"] --> P0["Phase 0<br/>触发条件块划分"]
+    IN["SKILL.md 目录"] --> P0["Phase 0<br/>两层分块：Entry → Action"]
     P0 --> P1["Phase 1<br/>D(s) 声明轨 + A(s) 实际轨"]
     P1 --> P2["Phase 2<br/>U/O + compound + Φ(s)"]
-    P2 --> P3["Phase 3<br/>V_actual ∨ V_decl ∨ Judge"]
+    P2 --> P3["Phase 3<br/>三路逐块判定 → block_verdicts"]
     P3 --> P4["Phase 4<br/>攻击链 DAG"]
     P4 --> OUT["result.json + trace.json"]
     OUT --> VIZ["前端标注页 / HTML 报告 / benchmark"]
@@ -333,7 +343,7 @@ flowchart TD
    - Phase 3（确定性部分）：15 条规则引擎 `first-match-wins` 命根因；Relaxed-Veto 检查；产出 `_det_verdict`。
    - 同时产出：`phase0` 块结构、`classification` 四象限、`capability_counts`、`_meta`。
 3. **LLM 增强管线**（仅模式 B）：
-   - Phase 0：IncrementalAgent 把 body 增量划分为触发条件块（见 §8）。
+   - Phase 0：partition（触发 Entry）+ action_extract（原子 Action）两层分块（见 §8）。
    - D_llm 语义提取声明能力 → 与 D_det 合并。
    - A_llm_instr 提取指令级实际能力 + 判断每个实际操作的 `covered_by_declared` → 语义 U。
    - V_decl 块级分类：每块打 2×2 标签，U1–U8 命中即 `unconditional_harmful`。
@@ -408,11 +418,18 @@ npm run schema:check               # 校验 experiment/results/**/*.json 匹配�
 
 > 每阶段按统一格式展开：**目标 → 输入 → 处理 → 输出 / 消费方**。系统示意图（mermaid 全图）见 `docs/system-diagrams.md`。
 
-## 8　Phase 0　块划分
+## 8　Phase 0　两层分块（触发 Entry + 原子 Action）
 
 ### 目标
 
-把 `SKILL.md` 的正文切成**触发条件块（trigger-condition block）**——"在同一个触发条件下执行的最大行区间"。块是**后续所有标注操作的基本单元**（V_decl 分类、攻击链、前端展示都以 `block_id` 为单位），替代早期的"逐句"粒度。
+把 `SKILL.md` 正文划分为**两层块**，作为后续所有标注操作的基本单元（V_decl 分类、攻击链、前端展示都以 `block_id` 为单位）：
+
+```
+第一层 partition：     按触发条件划 trigger Entry 区间（同条件合并，仅条件变化才拆）
+第二层 action_extract：每个 Entry 内按原子操作划 action 区间（最终 blocks）
+```
+
+块粒度由 **原子操作** 定义：一个 fenced 代码块 = 1 个 action、一个祈使句 = 1 个 action、纯描述性散文不算 action。相比"每行一块"（旧 fallback 会把 411 行 body 切成 412 块、单块输出超限卡死），两层分块把块数控制在受审计粒度内。
 
 ### 输入
 
@@ -420,30 +437,43 @@ npm run schema:check               # 校验 experiment/results/**/*.json 匹配�
 
 ### 处理
 
-1. **拆 frontmatter / body**（`split_skill_units`）：frontmatter 作为**元数据块**（触发条件来源，不参与划分）；body 为其余。两者各去空行、strip。
-2. **生成种子**（`build_phase0`）：输出初始结构，含 `frontmatter_block`（`block_id=1`，`kind="frontmatter"`）、`body_offset`（body 第一行全局行号）、`body_lines`（去空行 body 行）、`body_text`。行号是**去空行后的全局行号**。
-3. **IncrementalAgent 增量划分**（工程实现，见 §13.4）：循环调用**全新、无历史**的 subagent，每次只提交"当前未覆盖区间"，要求它从区间开头切出**第一个**触发条件块，返回 `{line_start, line_end, trigger_condition}`；随后收缩未覆盖区间、开下一个 agent，直到覆盖全部 body 或达到迭代上限。
+1. **拆 frontmatter / body**（`split_skill_units`）：frontmatter 作为**元数据块**（`block_id=1`，触发条件来源，不参与划分）；body 为其余。两者各去空行、strip。行号是**去空行后的全局行号**。
+2. **生成种子**（`build_phase0` + `scripts/skill_chunk.py`）：输出 `frontmatter_block`、`body_offset`、`body_lines`、`body_text`。
+3. **第一层 partition**（prompt 见 `prompts.py::render_partition_prompt`，规则迁移自 `reference/SKILL_CHUNKING_MIGRATION.md`）：IncrementalAgent 循环，每次新开无历史 subagent 看**未覆盖 body 区间**，返回一个触发 Entry `{action:"submit", start_line, end_line, subkind, summary}` 或 `{action:"finish"}`。**同触发条件的一切合并为一个区间**（frontmatter 描述/触发句 + prose + 代码块 + 后续动作，被空行/heading 隔开也不拆）；仅触发条件真正变化才拆；整文件同条件加载则提交整个范围。`subkind` 校验 `trigger.*` 词表。
+4. **第二层 action_extract**（prompt 见 `prompts.py::render_action_extract_prompt`）：对每个 Entry 再次 IncrementalAgent 循环，每次提交一个原子 Action `{action:"submit", start_line, end_line, summary}` 或 `{action:"finish"}`。每个 action 成为一个 `block`（`kind:"action"`，带 `trigger_condition`=所属 Entry 的 subkind、`entry_summary`）。
+5. **截断预算（硬约束）**：防止对超大 body 逐块切造成 agent 调用风暴（后端慢时 40+ 次串行调用极慢）：
+   - `PHASE0_MAX_AGENTS = 20`（partition + action 总 agent 预算）
+   - `MAX_ACTIONS_PER_ENTRY = 15`（每 Entry action 上限）
+   - `MAX_TOTAL_BLOCKS = 35`（总块数上限，含 frontmatter）
+   - 达到预算即停止细粒度切分，剩余未覆盖行**合并为一个兜底块**（summary 标记 `[截断]`）；`finish`（agent 判定剩余无内容）不兜底。
 
 ### 输出
 
 ```jsonc
 {
-  "unit": "trigger-block",
-  "frontmatter_block": { "block_id": 1, "kind": "frontmatter", "line_start": 1, "line_end": 4,
-                         "trigger_condition": "frontmatter 元数据（触发条件来源，不参与划分）", "text": "...", "sentences": ["..."] },
+  "unit": "action-block",
+  "frontmatter_block": { "block_id": 1, "kind": "frontmatter", "line_start": 1, "line_end": 4, "...": "..." },
   "body_offset": 4,
   "body_lines": ["..."],
   "body_text": "...",
-  "blocks": [ /* frontmatter 块 + 各触发块 */ ],
-  "count": 12
+  "entries": [ { "start_line": 5, "end_line": 418, "subkind": "on-load.always",
+                 "summary": "whole file loads together (when this skill is loaded)" } ],
+  "blocks": [
+    { "block_id": 2, "kind": "action", "line_start": 21, "line_end": 32,
+      "trigger_condition": "on-load.always", "entry_summary": "...", "summary": "execute curl ...",
+      "text": "...", "sentences": ["..."] }
+  ],
+  "count": 4
 }
 ```
 
-每个正文块：`{block_id, kind:"trigger", line_start, line_end, trigger_condition, text, sentences}`。`block_id` 是全局连续编号，后续所有标注用它引用块。
+每个正文块：`{block_id, kind:"action", line_start, line_end, trigger_condition, entry_summary, summary, text, sentences}`。`block_id` 全局连续（frontmatter=1，action 从 2 起），后续所有标注用它引用块。
 
 ### 消费方
 
+- **det_block_hits**（§11.1）：静态证据按 `block.scripts`（块内正则提取的脚本名）归因到块；
 - **V_decl 分类**（§11.3）：按块分类，`coverage.total_blocks = count`，要求 100% 覆盖；
+- **LLM Judge**（§11.4）：按块审计（块审计信息），分批输出 `block_judgments`；
 - **前端**（§16.1）：按块渲染六色标注，块头显示触发条件，未标注块灰底；
 - **攻击链**（§12）：恶意块 → 重构攻击链。
 
@@ -589,53 +619,84 @@ flagged_as_high_risk = (risk_score >= 10)
 
 ---
 
-## 11　Phase 3　恶意审计
+## 11　Phase 3　恶意审计（三路 block 级判定）
 
 ### 目标
 
-输出最终判定 `ŷ = V_actual ∨ V_decl ∨ Judge`，并给出根因分类（8 分支 × 36 叶意图）。
+三路判定（确定性 det / 直接恶意 V_decl / LLM Judge）**各自以 block 为单位**产出恶意判定，Phase 3 末尾汇总为 `block_verdicts[]`，全局结论由简单规则归约（存在恶意 block 则全局恶意），并给出根因分类（8 分支 × 36 叶意图）。**任何阶段都不直接产出全局 verdict**。
 
-### 11.1 V_actual：Relaxed-Veto（确定性硬否决）
+### 11.1 V_actual（det）：确定性证据 → block
 
-触发条件：
+Relaxed-Veto 与规则引擎的确定性判定（`_det_verdict`）本身不含代码定位。Phase 3 把确定性证据**归因到 block**（`det_block_hits`）：
+
+- **SKILL.md 内证据**：`capability_code_evidence[cap].locations[]` 中 `file == "SKILL.md"` 的行号直接对位 block（`line_start ∈ [block.line_start, block.line_end]`）；
+- **scripts 证据**：`locations[].file` 为 `scripts/*` 时，按脚本名归因到所有 `block.scripts` 含该脚本名的块（Phase 0 已提取）；
+- **三级兜底**：det 判恶意（`_det_verdict.verdict == "malware"`）但无任何块命中 → 取首个 `action_instruction` 块（`source: "det-fallback"`），**保证"det 判恶意必有 block"**。
+
+Relaxed-Veto 触发条件（供 §11.1 归因使用）：
 
 ```
 V(Φ(s)) = 𝟙[ compound(s) ≠ 0 ∧ ∃τ ∈ U(s): risk(τ) ≥ High ]
 ```
 
-任一复合标志命中 **且** U 中存在 critical/high 风险未声明能力 → 无条件判 malware（`verdict_source="relaxed_veto"`，置信度 0.90），不依赖 LLM，可审计。
+任一复合标志命中 **且** U 中存在 critical/high 风险未声明能力 → 判 malware（置信度 0.90），不依赖 LLM，可审计。
 
 ### 11.2 规则引擎：根因分类（确定性）
 
-15 条规则 `first-match-wins`，命中即给出 `(intent_leaf, branch, rule_id, kill_chain)`（完整表见附录 B）。覆盖：指令劫持（R1）、dropper（R2）、凭证窃取（R3/R8/R9）、规避（R4）、勒索（R5）、数据擦除（R6）、挖矿（R7）、数据外泄（R10/R11）、持久化（R12）、侦察（R13）、过度声明（R14）、遥测（R15）。
+15 条规则 `first-match-wins`，命中即给出 `(intent_leaf, branch, rule_id, kill_chain)`（完整表见附录 B）。覆盖：指令劫持（R1）、dropper（R2）、凭证窃取（R3/R8/R9）、规避（R4）、勒索（R5）、数据擦除（R6）、挖矿（R7）、数据外泄（R10/R11）、持久化（R12）、侦察（R13）、过度声明（R14）、遥测（R15）。无规则命中 → 标记 `needs_classifier=true`，交给 LLM 分类器归因。规则引擎的恶意结论由 §11.1 归因到 block。
 
-无规则命中 → 标记 `needs_classifier=true`，交给 LLM 分类器（在 36 叶意图中归因）。
+### 11.3 V_decl：块级直接恶意（U1–U8）
 
-### 11.3 V_decl：块级恶意分类（工程实现）
-
-对 Phase 0 每个块做 2×2 分类：
+对每个 action block 做 2×2 分类 + 无条件有害识别：
 
 | 象限 | 含义 |
 |------|------|
 | no-deviation-benign | 一致且无害 |
-| **no-deviation-malicious** | **一致但声明动作本身无条件有害** → V_decl 命中 |
+| **no-deviation-malicious** | 一致但声明动作本身无条件有害 |
 | deviated-benign | 不一致但无害（疏忽/过度工程） |
 | deviated-malicious | 不一致且有害 |
 
-**U1–U8 无条件有害识别**：若某块声明的动作不存在任何合理的用户授权/合法使用场景 → 归入 `unconditional_harmful`（完整清单见附录 A）。命中即 `vdecl.fired=true`，`verdict='malware'`。
+**U1–U8 无条件有害识别**：某块声明的动作不存在任何合理的用户授权/合法使用场景 → 归入 `unconditional_harmful`（完整清单见附录 A）。
 
-### 11.4 LLM Judge（最终法官）
+**B3 硬校验（防误报）**：`unconditional_harmful` 命中落盘前经 `filterUnconditionalHits` 清洗——① `non_action` 块不参与 U 命中 ② 与块级分类自相矛盾（`malicious_label="benign"`）的命中丢弃 ③ U3/U8 锚校验：惰性 markdown 引用（纯链接/图片且无 `curl/wget/exec` 等执行动词）豁免。这是**"敏感指令本身不可判恶意"**原则在 V_decl 的实现。
 
-输入：`Φ(s)` 证据（D/A/U/O、flows、compound、rule_engine、relaxed_veto、findings、URLs）+ V_decl 命中摘要 + skill 原文（截断）。输出：`{verdict, confidence, reasoning, intent_category, key_evidence}`。以最高推理强度（xhigh）运行。
+### 11.4 LLM Judge：逐块审计（审计对象 = 块审计信息）
 
-### 11.5 根因输出
+Judge 的审计对象从"全局证据摘要 + skill 原文"改为**块审计信息**：每块携带 `text(截断600) + kind + vdecl 标注 + det 命中 + scripts`，D/A/U/O 仅作全局上下文。全部块分批（每批 `VDECL_CHUNK` 块）输出：
+
+```jsonc
+{ "block_judgments": [
+    { "block_id": 2, "verdict": "benign"|"malicious",
+      "intent_category": "A"-"H"|null, "confidence": 0-1, "reasoning": "..." }
+] }
+```
+
+Judge 不产出全局 verdict——全局结论由 Phase 3 汇总归约。以最高推理强度（xhigh）运行。
+
+### 11.5 Phase 3 汇总 → block_verdicts → 全局简单规则
+
+```js
+block_verdicts[] = blocks.map(b => {
+  det   = detBlockHits.filter(h => h.block_id === b.block_id)              // V_actual 命中
+  vdecl = unconditional_harmful.find(h => h.block_id === b.block_id)       // V_decl 命中
+          || (block_classifications[b].classification includes "malicious")
+  judge = judgeById[b.block_id].verdict === "malicious"                    // Judge 命中
+  is_malicious = (det || vdecl || judge);
+  sources = [命中的来源...];   // det | vdecl | judge
+});
+
+verdict        = block_verdicts.some(v => v.is_malicious) ? "malware" : "benign";
+verdict_source = 首个恶意块的 sources[0]；全 benign → "llm_judge";
+```
+
+### 11.6 根因输出
 
 `root_cause`：`{classification, intent_category, intent_leaf, intent_leaf_description, kill_chain, rule_engine_match, classifier_source}`。`classification ∈ {adversarial, non_adversarial, ambiguous}`；LLM 输出非法叶时降级 `H2`。
 
 ### 输出 / 消费方
 
-- `phase3_deterministic`（rule_engine / relaxed_veto / needs_classifier）、`vdecl`（block_classifications / unconditional_harmful / coverage）、`root_cause`、顶层 `verdict/confidence/verdict_source`；
-- 消费方：Phase 4（恶意块列表）、前端（判定徽章 + 根因）、benchmark（判分）。
+- `block_verdicts`（三路合并，Phase 4 与前端消费）、`det_block_hits`、`judge.block_judgments`、`vdecl`（block_classifications / unconditional_harmful / coverage）、顶层 `verdict/confidence/verdict_source`；
+- 消费方：Phase 4（恶意块列表 → 攻击链）、前端（判定徽章 + 逐块三路来源 + 根因）、benchmark（判分）。
 
 ---
 
@@ -706,7 +767,7 @@ subagent 通过 Bash 调用 Python CLI，以 **stdout JSON** 交换结构化数�
 四类可复用编排模式：
 
 1. **Pipeline**：每 case 一组阶段（`pipeline` 并行跑多个 case），阶段内 Promise.all 并行；
-2. **IncrementalAgent（Phase 0）**：循环开**全新、无历史**的 subagent，每次只提交"当前未覆盖区间"，让它从区间开头切出第一个触发条件块，然后收缩区间、开下一个。设计意图：原子任务、避免长上下文累计偏差、避免单次输出超限。
+2. **IncrementalAgent（Phase 0）**：循环开**全新、无历史**的 subagent，每次只提交"当前未覆盖区间"（第一层 partition 切触发 Entry、第二层 action_extract 切原子 Action），返回 `{action:"submit"|"finish", start_line, end_line, ...}`，然后收缩区间、开下一个；带截断预算（见 §8）。设计意图：原子任务、避免长上下文累计偏差、避免单次输出超限。
 3. **Chunked StructuredOutput（V_decl）**：`VDECL_CHUNK = 120` 块一批，每批一个带 schema 的 agent，结果按 `block_id` 去重合并排序；
 4. **Backfill（覆盖补测）**：比对已分类 block_id 与全部块，**漏标块逐一单独补测**，确保 `coverage` 100%。
 
@@ -830,7 +891,7 @@ npm run prompt:render -- --multi d_llm_extract,a_llm_instr   # 一次渲染多�
 
 ```jsonc
 {
-  "phase0":               { "unit", "count", "blocks[]" },
+  "phase0":               { "unit", "count", "entries[]", "blocks[]" },   // 两层分块：trigger Entry + action block
   "phase1":               { "skill_name", "skill_dir", "structure", "frontmatter", "tools",
                             "skill_body", "D_deterministic", "d_det_evidence",
                             "A_ast", "A_regex", "flows_ast", "ast_findings", "regex_findings",
@@ -847,7 +908,7 @@ npm run prompt:render -- --multi d_llm_extract,a_llm_instr   # 一次渲染多�
 }
 ```
 
-**LLM 增强后（workflow 合并）追加**：`verdict`、`confidence`、`verdict_source`、`verdict_reasoning`、`capabilities{declared,actual,undeclared,overdeclared,declared_sources,actual_sources}`、`flows`、`compound_flags`、`root_cause`、`vdecl`、`attack_chains`、`findings`、`urls`、`relaxed_veto`。
+**LLM 增强后（workflow 合并）追加**：`verdict`、`confidence`、`verdict_source`、`verdict_reasoning`、`capabilities{declared,actual,undeclared,overdeclared,declared_sources,actual_sources}`、`flows`、`compound_flags`、`root_cause`、`vdecl`、`det_block_hits`（确定性证据 → block 归因，含 `skill-md` / `script:*` / `det-fallback` 来源）、`block_verdicts`（**三路 det/vdecl/judge 逐块合并**，每块 `is_malicious` + `sources`）、`judge`（`block_judgments` 逐块审计）、`attack_chains`、`phase1`（完整管道，供前端代码证据）、`d_llm_caps`、`deterministic_evidence`、`findings`、`urls`、`relaxed_veto`。
 
 ### 15.3 trace：与 result 分离的调试追踪
 
@@ -1010,7 +1071,7 @@ MAS4MalSkill/                    # 本地工作目录名（仓库名 BIVMSA）
 │   │   └── llm_instruction.py   #   LLM 指令级能力提取（含幻觉校验）
 │   ├── deviation.py             # 偏差 U/O + 4 compound flags + Φ(s) + 风险评估
 │   ├── root_cause.py            # 规则引擎 + LLM 分类器 + 36 叶意图
-│   ├── malicious_detect.py      # Relaxed-Veto + LLM Judge 合并 → ŷ
+│   ├── malicious_detect.py      # Relaxed-Veto（确定性硬否决）
 │   ├── chunking.py              # Phase 0 块划分（build_phase0 / chunk_skill_text）
 │   ├── prompts.py               # 提示词单一权威源（single/batch 变体）
 │   ├── trace.py                 # TraceContext（records/phases/agent_calls/decisions）

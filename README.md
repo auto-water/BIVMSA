@@ -1,20 +1,50 @@
-# BIVMSA — 恶意 Skill 审计系统
+# BIVMSA — 基于偏差分析的恶意 Skill 审计系统
 
 > **BIVMSA (Behavior Integrity Verification for Malicious Skill Audit)** 多智能体系统，对未知 AI Agent Skill 进行上架前安全审计。
 >
 > 输入一个 Skill 目录，输出 `benign`（良性，可上架）或 `malware`（恶意，拒绝上架）的判定及完整证据链。
 >
-> 严格复现论文 *Behavioral Integrity Verification for AI Agent Skills* (Yuhao Wu et al., 2025, arXiv:2605.11770)。
+> 系统根植于论文 *Behavioral Integrity Verification for AI Agent Skills* (Yuhao Wu et al., 2025, arXiv:2605.11770) 的"声明/实际双轨验证"思想；本文档是工程侧的设计定位与实现说明。
 
 ---
 
-## 一、项目简介
+## 一、系统要解决的问题
 
-对 AI Agent Skill（如 Claude Code Skills）进行发布前的自动化安全审计。Skill 可能携带隐藏的恶意代码，伪装成正常功能。本系统通过**声明能力与实际能力的偏差检测**来识别恶意行为。
+### 1.1 问题：高权限原子指令 / 提示词片段容易引起误报
 
-**核心假设**：一个 Skill 是恶意的，当且仅当它**违背了用户意愿**（声明与实际能力不匹配）**且很可能造成负面影响**（存在高风险未声明能力）。
+SKILL.md 里的敏感指令片段——`curl`/`wget` 下载、`subprocess`/`exec` 执行、高权限文件/网络操作、`ignore previous instructions` 提示词——**单独出现时是中性工具**：
 
-### 支持的恶意模式
+- 一个"系统更新"skill 用 `curl` 拉取安装包，是合理功能；
+- 一个"安全审计"skill 列出攻击命令，是文档说明；
+- 一个"meme 生成"skill 出现 `![ClawMeme](https://…)` 图片链接，是纯展示。
+
+**若直接以"指令敏感性"判恶意（出现 curl/exec/高权限即标记），会产生大量误报（FP）**——把正常功能误判为恶意。传统静态扫描（规则/正则/单一特征匹配）正是栽在这里：`curl`、`javascript:alert(1)`、图片引用这类片段在良性 skill 中大量存在。
+
+### 1.2 方案：偏差分析建模（deviation analysis）
+
+系统**不孤立判断指令是否敏感**，而是做**声明能力 vs 实际能力**的偏差建模：
+
+- **D(s) 声明能力**：SKILL.md 显式声明的功能（frontmatter + 自然语言意图提取）
+- **A(s) 实际能力**：从 AST 污点流 / 正则引擎 / LLM 指令分析提取的**真实执行**的敏感操作
+- **U(s) = A − D　未声明能力**：实际在做、但没声明的敏感操作（**核心偏差信号**）
+- **O(s) = D − A　过度声明**：声称能做、实际不做的能力（虚假声明信号）
+
+### 1.3 核心原则
+
+> **敏感指令本身不可判恶意；但声明之外出现的敏感指令，是强恶意候选。**
+
+两条推论驱动全部判定逻辑：
+
+1. **声明内的敏感指令 → 良性候选**：`curl`/`exec` 出现在声明能力内（如"用 curl 拉取配置"），视为合理功能，不可据此判恶意；
+2. **声明外的敏感指令 → 强恶意候选**：同一 `curl`/`exec` 出现在声明之外（未声明的下载执行、隐藏的数据外泄），构成偏差 `U(s)`，是恶意判定的强信号。
+
+**判定不产出"全局结论"，而是逐块（block）归约**：
+
+- **Phase 0** 把 SKILL.md 分为两层块：**触发 Entry（partition，同触发条件合并）→ 原子 Action（action_extract，代码块=1/祈使句=1）**；
+- **Phase 3** 三路（确定性 det / 直接恶意 U1-U8 / LLM Judge）**各自对块判定**，汇总为 `block_verdicts`；
+- **全局 verdict = 简单规则：存在恶意 block 则全局恶意**——任何阶段都不直接出全局结论。
+
+### 1.4 支持的恶意模式
 
 | 模式 | 示例 | 检测方式 |
 |------|------|---------|
@@ -74,12 +104,16 @@ MAS4MalSkill/
 ├── docs/                     # 说明文档
 │   ├── system-spec.md        # 系统说明书 (设计思路/术语/技术栈/编排/数据模型/可视化)
 │   ├── system-diagrams.md    # 系统示意图 (mermaid: 架构/时序/流程/各 Phase)
+│   ├── audit-flow-static-dynamic.html   # 静态×动态双管线审计流程手绘图
+│   ├── system-architecture.png         # 系统架构图（PPT 用，横向）
+│   ├── bugs-found-during-testing.md    # 测试发现的问题汇总
 │   └── schemas/              # result / final-result / trace 三个 JSON Schema
 ├── reference/                # 开发过程参考文件
-│   ├── execution-plan.md     # 修改执行计划 (Phase 0-4 进度)
-│   ├── my-approach-modification-plan.md  # 修改计划依据 (Phase 0-3)
+│   ├── SKILL_CHUNKING_MIGRATION.md     # Phase 0 两层分块迁移依据（skillprof）
 │   ├── chunking-phase0-v2.md # 块划分 v2 设计 (触发条件块)
-│   ├── p-flow-investigation.md # P-flow 调研 (Phase 3.3)
+│   ├── execution-plan.md     # 修改执行计划 (Phase 0-4 进度)
+│   ├── my-approach-modification-plan.md
+│   ├── p-flow-investigation.md
 │   └── skill-scanner/        # 旧版 scanner 参考
 ├── src/biv/                  # BIV 核心实现
 │   ├── taxonomy.py           # 7类x29能力 + 意图分类 + 规则
@@ -92,20 +126,32 @@ MAS4MalSkill/
 │   ├── deviation.py          # Module 3: 偏差检测 + compound flags
 │   ├── root_cause.py         # Module 4: 15条规则 + LLM 分类器
 │   ├── malicious_detect.py   # Module 5: Relaxed-Veto + LLM Judge
+│   ├── chunking.py           # Phase 0 两层分块基础（frontmatter/body 行级）
+│   ├── prompts.py            # LLM prompt 模板单一权威源（含 partition/action_extract）
 │   ├── skill_parser.py       # 稳定单 skill 目录解析（各入口共用）
 │   └── orchestrator.py       # 三阶段编排器 + CLI + build_det_evidence()
 ├── scripts/
 │   ├── biv_audit.py          # [模式A] 单 skill 审计 (--evidence 精简模式)
 │   ├── batch_audit.py        # [模式A] 批量确定性审计 (递归发现用例)
 │   ├── skill_parse.py        # skill_parser 的 CLI 入口（workflow 复用）
-│   ├── biv_workflow.js       # [模式B] LLM 单 case 审计 (Claude Agent)
-│   └── batch_workflow.js     # [模式B] LLM 批量审计 (Claude Agent)
+│   ├── skill_chunk.py        # Phase 0 seed CLI（frontmatter_block + body_lines）
+│   ├── prompt_render.py      # prompt 模板渲染 CLI（prompts.py 单一权威源）
+│   ├── report_html.py        # 前端 HTML 标注页生成（六色逐块 + 攻击链 DAG）
+│   ├── benchmark.py          # 基准判分（准确率/精确率/召回率/F1）
+│   ├── register_dataset.py   # 数据集注册到 benchmark.yaml
+│   ├── schema_check.py       # JSON Schema 校验
+│   ├── biv_workflow.js       # [模式B] LLM 单 case 审计 (Claude Agent Workflow)
+│   ├── batch_workflow.js     # [模式B] LLM 批量审计 (Claude Agent Workflow)
+│   └── batch_claude_test.sh  # [模式B] 批量测试 bash（claude --bg 并发 + 进程管理）
 └── experiment/
-    ├── cases/                # 测试用例 (std-cases-4: benign/ malware/)
-    │   └── std-cases-4/
-    │       ├── benign/       #   良性 skill (标签由目录路径推导)
-    │       └── malware/      #   恶意 skill
-    └── results/              # 批量测试输出 (镜像 cases 结构，每 case 一个 result.json)
+    ├── cases/                # 测试用例（多数据集，标签由 benign/malware 路径段推导）
+    │   ├── std-cases-4/      # 基础基准 (benign/ malware/)
+    │   ├── hard/             # hard 数据集（92 case）
+    │   ├── hard-small/       # hard 有结果子集（48 case）
+    │   └── smoke/            # 连通性冒烟样例
+    ├── results/              # 批量测试输出（镜像 cases 结构，每 case 一个 result.json）
+    ├── scanner/              # sentry-skill-scanner 对比数据（本地，不入库）
+    └── benchmark.yaml        # 数据集注册表（ground truth 覆盖/说明）
 ```
 
 ---
@@ -149,7 +195,7 @@ license: MIT                          # 可选
 
 ### 3.3 测试用例约定
 
-测试用例位于 `experiment/cases/std-cases-4/` 下，按真实标签分目录存放：
+测试用例位于 `experiment/cases/` 下的多个数据集（`std-cases-4/` 基础基准、`hard/` 92 case、`hard-small/` 有结果子集 48 case、`smoke/` 连通性冒烟），按真实标签分目录存放：
 
 ```
 experiment/cases/std-cases-4/
@@ -240,6 +286,18 @@ experiment/cases/std-cases-4/
   "trace_summary": "Trace: ...\nTotal duration: 25ms..."
 }
 ```
+
+> **模式 B（Workflow）输出**：`biv_workflow.js` 在上述确定性字段之外，还输出块级判定字段（顶层）：
+>
+> | 字段 | 说明 |
+> |------|------|
+> | `verdict` / `verdict_source` | 全局结论 = 简单规则（**存在恶意 block 则全局恶意**）；`verdict_source` 取首个恶意块来源（`det` \| `vdecl` \| `judge`），全 benign → `llm_judge`，Phase 0 停滞 → `phase0-stalled` |
+> | `phase0` | 两层分块结果：`entries`（触发 Entry，含 subkind） + `blocks`（原子 Action，含 line 区间 / trigger_condition / summary） |
+> | `vdecl` | 声明轨道直接恶意通道：`unconditional_harmful`（U1-U8 命中，经非 action/惰性引用硬校验清洗）+ `block_classifications`（2×2 分类） |
+> | `block_verdicts` | **三路（det / vdecl / judge）逐块合并判定**：每块 `is_malicious` + `sources`，Phase 4 与前端消费 |
+> | `det_block_hits` | 确定性证据到 block 的归因（SKILL.md 行直接对位 ∪ scripts 名关联 ∪ 三级兜底） |
+> | `judge` | LLM Judge 逐块审计结果（`block_judgments`：block_id + verdict + intent + reasoning） |
+> | `attack_chains` | 恶意块的攻击链构造（user_input 触发 + flow_items 恶意代码片段） |
 
 ### 4.2 批量输出 (JSON)
 
