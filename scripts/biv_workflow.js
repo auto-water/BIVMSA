@@ -112,6 +112,22 @@ ${b64}
   );
 }
 
+// 通用 render：subagent 用 base64 把 vars 写到临时文件，再 `python prompt_render.py < file`。
+// 替代 heredoc 传大 vars —— heredoc 命令超长（bash 单次调用限制）会导致 blocks 丢失，
+// prompt_render 静默 fallback 成"每行一块"（E1 的 412 块风暴根因）。
+async function renderPromptViaBase64Vars(name, skillDirArg, variant, vars, label) {
+  const tmpFile = normPath(`experiment/results/_render_vars_${name}_${label.replace(/[^a-z0-9]/gi, '')}.json`);
+  await writeJsonViaBase64(agent, vars, tmpFile, `${label}-write-vars`);
+  return agent(
+    `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
+
+python scripts/prompt_render.py ${name} --skill-dir ${skillDirArg} --variant ${variant} < ${tmpFile}; rm -f ${tmpFile}
+
+Return ONLY the rendered prompt text.`,
+    { label: `${label}-run` }
+  );
+}
+
 // =============================================================================
 // Main Workflow
 // =============================================================================
@@ -349,66 +365,150 @@ The output is a single JSON object. Output ONLY that JSON object.`,
     const seed = parseJsonOutput(seedRaw);
     if (!seed || !Array.isArray(seed.body_lines)) {
       log('Phase 0 seed invalid');
-      return { unit: 'trigger-block', count: 0, blocks: [] };
+      return { unit: 'action-block', count: 0, blocks: [] };
     }
     const fmBlock = seed.frontmatter_block || null;
     const bodyLines = seed.body_lines;
     const bodyOffset = seed.body_offset || 0;
     const bodyTotal = bodyOffset + bodyLines.length;
-    const blocks = fmBlock ? [fmBlock] : [];
+    const actionBlocks = [];
 
-    let start = bodyOffset + 1;
-    let iter = 0;
-    let stall = 0;
-    const MAX_ITER = 60;
+    // ---- 第一层 partition：按触发条件切 trigger Entry（同条件合并，仅条件变化才拆）----
+    // 迁移自 reference/SKILL_CHUNKING_MIGRATION.md（partition.md）。prompt 直接拼
+    // （remaining 大文本不经 prompt_render heredoc，避免命令长度限制导致 blocks 丢失
+    // fallback 成"每行一块"）。agent 一次只提交一个 Entry，或 finish。
+    const PARTITION_RULES = `You are a skill-chunking assistant (layer 1: trigger partition) for the AI agent skill "${skillName}".
+
+## Goal
+Find ONE trigger region in the assigned scope of SKILL.md body. A trigger region is the MAXIMAL line range that fires under ONE condition (when the skill loads, when the user asks, on a schedule, on second use, ...).
+
+## Rules
+- A frontmatter "description" or "when this Skill is loaded" statement can start an on-load trigger.
+- GROUPING (important): everything that fires under the SAME condition belongs in ONE region — KEEP IT TOGETHER rather than splitting. A trigger region spans from the firing statement through ALL content it causes to run (prose, code blocks, conditionals, follow-on actions), even if separated by blank lines or headings. Only split when the firing condition ACTUALLY changes (e.g. load section vs. a separate user-query keyword vs. a schedule). If the whole remaining body loads and runs together, submit ONE on-load region covering it.
+- Submit EXACTLY ONE region starting at or after the given global line. Do not cover more.
+
+## Output
+Return a single JSON object:
+{"action": "submit", "start_line": N, "end_line": M, "subkind": "<trigger.* vocab>", "summary": "<why this subkind — quote the trigger phrasing>"}
+OR {"action": "finish"} if the remaining scope has NO trigger-worthy content (only headings, blank lines, list markers, comments, or prose that does not itself fire or cause execution).
+
+subkind must be one of:
+on-load.always | on-load.include | on-load.other
+on-exec.user-query | on-exec.schedule | on-exec.env-match | on-exec.compose | on-exec.fallback | on-exec.other
+on-update.second-use | on-update.mutate-self | on-update.other
+other`;
+
+    // ---- 第二层 action_extract：Entry 内按原子操作切 action（迁移自 action_extract.md）----
+    const ACTION_RULES = `You are a skill-chunking assistant (layer 2: atomic action extraction) for the AI agent skill "${skillName}".
+
+## Goal
+Find ONE atomic action in the assigned scope (a trigger Entry range of SKILL.md body).
+
+## Rules
+An atomic action is ONE observable operation:
+- execute: a command / code block / subprocess;
+- I/O: a file, network, or environment read/write/fetch;
+- agent-directed prose: an imperative to the agent — "run ...", "always/never ...", "load/follow ...", "assume the role ...", "invoke tool ...", a hook/trigger-word binding, or framing text that directs behavior;
+- other transforms, privilege/config changes, memory, or a terminal/return step.
+Do NOT confuse descriptive prose ("This script does X") with a directive ("Run this script"). Only the latter is an action.
+
+## Boundaries
+- A fenced code block (\`\`\` ... \`\`\`) is ONE action: include BOTH fence lines in its range.
+- One imperative prose sentence = one action.
+- Submit EXACTLY ONE action starting at or after the given global line. Do not cover more.
+
+## Output
+Return a single JSON object:
+{"action": "submit", "start_line": N, "end_line": M, "summary": "<what this one operation does, <=200 chars>"}
+OR {"action": "finish"} if the remaining scope has NO operation and NO directive (only headings, blank lines, list markers, code-fence lines, comments, or purely descriptive prose).`;
+
+    const entries = [];
+    let pStart = bodyOffset + 1;
+    let pIter = 0, pStall = 0;
+    const P_MAX = 40;
     let stalled = false;
-    while (start <= bodyTotal && iter < MAX_ITER) {
-      const prevStart = start;
-      const startIdx = start - bodyOffset - 1;
-      const remaining = bodyLines.slice(startIdx).join('\n');
+    while (pStart <= bodyTotal && pIter < P_MAX) {
+      const prevP = pStart;
+      const remainingP = bodyLines.slice(pStart - bodyOffset - 1).join('\n');
       const r = parseJsonOutput(await agent(
-        `You divide a SKILL.md body into "trigger-condition blocks": each block is the MAX line range that would be executed under ONE trigger condition (e.g. one section / scenario / instruction set).
-
-## SKILL.md body (uncovered range starting at global line ${start}; body offset ${bodyOffset}; last global line ${bodyTotal})
-${remaining}
-
-## Task
-From global line ${start}, cut out the FIRST trigger-condition block (the max consecutive line range belonging to one trigger condition).
-Return ONLY a JSON object:
-{"line_start": ${start}, "line_end": <global line, >= line_start, <= ${bodyTotal}>, "trigger_condition": "<short condition, e.g. install CLI | sign-in | read secrets>"}`,
-        { label: `chunk-part-${iter}` }
+        `${PARTITION_RULES}\n\n## Assigned scope (global de-blanked lines)\n${pStart}..${bodyTotal}\n\n## Uncovered remaining body text (starting at global line ${pStart})\n${remainingP}\n\n## Output JSON`,
+        { label: `partition-${pIter}` }
       ));
-      const effStart = (r && typeof r.line_start === 'number') ? r.line_start : start;
-      const le = (r && typeof r.line_end === 'number') ? r.line_end : start;
-      const effEnd = Math.max(effStart, le, start);
-      const li = Math.max(0, effStart - bodyOffset - 1);
-      const ri = Math.min(effEnd, bodyTotal) - bodyOffset - 1;
-      const lines = bodyLines.slice(li, Math.max(0, ri) + 1);
-      blocks.push({
-        block_id: blocks.length + 1,
-        kind: 'trigger',
-        line_start: Math.max(1, effStart),
-        line_end: Math.min(bodyTotal, effEnd),
-        trigger_condition: (r && r.trigger_condition) || '',
-        text: lines.join('\n'),
-        sentences: lines,
-      });
-      start = Math.min(bodyTotal, effEnd) + 1;
-      if (start <= prevStart) {
-        // 硬约束：effEnd 未推进 start（agent 无新产出）→ 停滞计数；连续 3 轮终止，
-        // 防止切块 agent 反复无产出造成 session 风暴。
-        stall += 1;
-        log(`Phase 0 切块停滞 ${stall} 轮（start=${prevStart}）`);
-        if (stall >= 3) { stalled = true; break; }
-      } else {
-        stall = 0;
+      if (r && r.action === 'finish') {
+        log(`Phase 0 partition finish at line ${pStart}`);
+        break;
       }
-      iter += 1;
+      const eS = (r && typeof r.start_line === 'number') ? r.start_line : pStart;
+      const eE = (r && typeof r.end_line === 'number') ? r.end_line : pStart;
+      // 硬约束：agent 提交的区间必须覆盖当前起点（line_start <= pStart <= line_end），
+      // 否则视为无效提交 → 计停滞（防止 agent 无产出时用 pStart 兜底强制前进、停滞守卫失效）。
+      const valid = eS <= pStart && eE >= pStart;
+      if (!valid) {
+        pStall += 1;
+        log(`Phase 0 partition 无效提交（start=${pStart}）第 ${pStall} 次`);
+        if (pStall >= 3) { stalled = true; break; }
+        continue;   // 不推进，等下一个 agent
+      }
+      const effEnd = Math.max(eE, pStart);
+      entries.push({
+        start_line: Math.max(pStart, eS),
+        end_line: Math.min(bodyTotal, effEnd),
+        subkind: (r && typeof r.subkind === 'string' && r.subkind) ? r.subkind : 'other',
+        summary: (r && r.summary) || '',
+      });
+      pStart = Math.min(bodyTotal, effEnd) + 1;
+      pStall = 0;
+      pIter += 1;
     }
-    return { unit: 'trigger-block', count: blocks.length, blocks, stalled };
+    log(`Phase 0 partition: ${entries.length} trigger entries`);
+
+    for (const e of entries) {
+      let aStart = e.start_line;
+      let aIter = 0, aStall = 0;
+      const A_MAX = 80;
+      while (aStart <= e.end_line && aIter < A_MAX) {
+        const prevA = aStart;
+        const remainingA = bodyLines.slice(aStart - bodyOffset - 1, e.end_line - bodyOffset).join('\n');
+        const r = parseJsonOutput(await agent(
+          `${ACTION_RULES}\n\n## Assigned scope (global de-blanked lines)\n${e.start_line}..${e.end_line}\n\n## Uncovered remaining Entry text (starting at global line ${aStart})\n${remainingA}\n\n## Output JSON`,
+          { label: `action-extract-${e.start_line}-${aIter}` }
+        ));
+        if (r && r.action === 'finish') break;
+        const aS = (r && typeof r.start_line === 'number') ? r.start_line : aStart;
+        const aE = (r && typeof r.end_line === 'number') ? r.end_line : aStart;
+        // 硬约束：action 区间必须覆盖当前起点，否则视为无效提交 → 停滞
+        const validA = aS <= aStart && aE >= aStart;
+        if (!validA) {
+          aStall += 1;
+          log(`Phase 0 action-extract 无效提交（start=${aStart}）第 ${aStall} 次`);
+          if (aStall >= 3) break;
+          continue;   // 不推进，等下一个 agent
+        }
+        const effEndA = Math.max(aE, aStart);
+        const liA = Math.max(0, Math.max(aStart, aS) - bodyOffset - 1);
+        const riA = Math.min(Math.min(e.end_line, effEndA), bodyTotal) - bodyOffset - 1;
+        const linesA = bodyLines.slice(liA, Math.max(0, riA) + 1);
+        actionBlocks.push({
+          block_id: actionBlocks.length + 2,  // block_id=1 是 frontmatter（若存在）
+          kind: 'action',
+          line_start: Math.max(aStart, aS),
+          line_end: Math.min(e.end_line, effEndA),
+          trigger_condition: e.subkind,
+          entry_summary: e.summary,
+          summary: (r && r.summary) || '',
+          text: linesA.join('\n'),
+          sentences: linesA,
+        });
+        aStart = Math.min(e.end_line, effEndA) + 1;
+        aStall = 0;
+        aIter += 1;
+      }
+    }
+    const blocksOut = fmBlock ? [fmBlock, ...actionBlocks] : actionBlocks;
+    return { unit: 'action-block', count: blocksOut.length, blocks: blocksOut, entries, stalled };
   } catch (e) {
     log(`Phase 0 chunking failed: ${e}`);
-    return { unit: 'trigger-block', count: 0, blocks: [] };
+    return { unit: 'action-block', count: 0, blocks: [] };
   }
 })();
 const blocks = phase0.blocks || [];
@@ -430,7 +530,7 @@ if (phase0.stalled) {
     verdict_source: 'phase0-stalled',
     skill_name: skillName,
     skill_dir: skillDir,
-    phase0: { unit: 'trigger-block', count: blocks.length, blocks },
+    phase0: { unit: 'action-block', count: blocks.length, blocks },
     _error: 'phase0 stalled: no new block in 3 rounds',
   };
   try {
@@ -524,14 +624,9 @@ for (let i = 0; i < blocks.length; i += VDECL_CHUNK) {
 
 const renderVdeclPrompt = (blockSubset, idx) => {
   const vars = { ...vdeclVars, blocks: blockSubset };
-  return agent(
-    `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
-
-python scripts/prompt_render.py sentence_classifier --skill-dir ${skillDir} --variant single <<'VARS_JSON'
-${JSON.stringify(vars)}
-VARS_JSON`,
-    { label: `render-vdecl-prompt${chunks.length > 1 ? '-' + idx : ''}` }
-  );
+  // 文件方式传 vars（base64 写盘 + 重定向），避免 heredoc 大 JSON 超 bash 命令长度限制
+  return renderPromptViaBase64Vars('sentence_classifier', skillDir, 'single', vars,
+    `render-vdecl${chunks.length > 1 ? '-' + idx : ''}`);
 };
 
 // 单批分类 helper：render → agent(schema)。单批失败重试 2 次。
@@ -728,14 +823,12 @@ const buildJudgeChunk = (blockSubset) => ({
     };
   }),
 });
-const renderJudgePrompt = (blockSubset, idx) => agent(
-  `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
-
-python scripts/prompt_render.py judge --skill-dir ${skillDir} --variant single <<'VARS_JSON'
-${JSON.stringify(buildJudgeChunk(blockSubset))}
-VARS_JSON`,
-  { label: `render-judge-prompt${judgeChunks.length > 1 ? '-' + idx : ''}` }
-);
+const renderJudgePrompt = (blockSubset, idx) => {
+  const vars = buildJudgeChunk(blockSubset);
+  // 文件方式传 vars，避免 heredoc 大 JSON 超 bash 命令长度限制
+  return renderPromptViaBase64Vars('judge', skillDir, 'single', vars,
+    `render-judge${judgeChunks.length > 1 ? '-' + idx : ''}`);
+};
 const classifyJudgeChunk = async (chunk, idx) => {
   const prompt = await renderJudgePrompt(chunk, idx);
   for (let t = 0; t < 2; t++) {
@@ -836,16 +929,7 @@ if (maliciousBlocks.length > 0) {
       },
       code_evidence: cceFiltered,
     };
-    const prompt = await agent(
-      `Run this shell command and return its EXACT raw stdout (the rendered prompt text), with NO commentary, NO markdown code fences:
-
-python scripts/prompt_render.py attack_chain --skill-dir ${skillDir} --variant single <<'VARS_JSON'
-${JSON.stringify(chainVars)}
-VARS_JSON
-
-Return ONLY the rendered prompt text.`,
-      { label: `render-chain-${idx}` }
-    );
+    const prompt = await renderPromptViaBase64Vars('attack_chain', skillDir, 'single', chainVars, `render-chain-${idx}`);
     const r = await agent(
       prompt,
       {

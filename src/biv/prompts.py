@@ -721,6 +721,102 @@ IMPORTANT:
 
 
 # =============================================================================
+# Phase 0 两层分块 prompt（迁移自 reference/SKILL_CHUNKING_MIGRATION.md）
+#   第一层 partition：按触发条件划 trigger Entry 区间（同条件合并，仅条件变化才拆）
+#   第二层 action_extract：Entry 内按原子操作划 action 区间
+#   行号 = 去空行后的全局行号（frontmatter 1..fm_n，body 从 fm_n+1 起）
+# =============================================================================
+
+_TRIGGER_VOCAB = (
+    "on-load.always | on-load.include | on-load.other\n"
+    "on-exec.user-query | on-exec.schedule | on-exec.env-match | on-exec.compose\n"
+    "on-exec.fallback | on-exec.other\n"
+    "on-update.second-use | on-update.mutate-self | on-update.other\n"
+    "other"
+)
+
+
+def render_partition_prompt(
+    skill_name: str,
+    scope_start: int,
+    scope_end: int,
+    remaining_text: str,
+) -> str:
+    """Phase 0 第一层：把 SKILL.md body 划分为触发条件 Entry 区间（一次一个）。
+
+    迁移自 skillprof partition.md：同一触发条件的一切合并为一个区间；只有触发
+    条件真正变化才拆；剩余范围无可触发内容则 finish。agent 每次只提交一个区间。
+    """
+    return f"""You are a skill-chunking assistant (layer 1: trigger partition) for the AI agent skill "{skill_name}".
+
+## Goal
+Find ONE trigger region in the assigned scope of SKILL.md body. A trigger region is the MAXIMAL line range that fires under ONE condition (when the skill loads, when the user asks, on a schedule, on second use, ...).
+
+## Assigned scope (global de-blanked lines)
+{scope_start}..{scope_end}
+
+## Uncovered remaining body text (starting at global line {scope_start})
+{remaining_text}
+
+## Rules
+- A frontmatter `description` or "when this Skill is loaded" statement can start an on-load trigger.
+- GROUPING (important): everything that fires under the SAME condition belongs in ONE region — KEEP IT TOGETHER rather than splitting. A trigger region spans from the firing statement through ALL content it causes to run: prose instructions, code blocks, conditionals, follow-on actions — even if separated by blank lines or headings. Do NOT split one trigger into prose-vs-code pieces. Only split when the firing condition ACTUALLY changes (e.g. load section vs. a separate user-query keyword vs. a schedule). If the whole remaining body loads and runs together, submit ONE on-load region covering it.
+- Submit EXACTLY ONE region starting at or after global line {scope_start}. Do not cover more.
+
+## Output
+Return a single JSON object:
+- {{"action": "submit", "start_line": N, "end_line": M, "subkind": "<trigger.* vocab>", "summary": "<why this subkind — quote the trigger phrasing>"}}
+- OR {{"action": "finish"}} if the remaining scope has NO trigger-worthy content (only headings, blank lines, list markers, comments, or prose that does not itself fire or cause execution).
+
+subkind must be one of:
+{_TRIGGER_VOCAB}
+"""
+
+
+def render_action_extract_prompt(
+    skill_name: str,
+    entry_start: int,
+    entry_end: int,
+    remaining_text: str,
+) -> str:
+    """Phase 0 第二层：在一个触发 Entry 区间内提取原子 Action 区间（一次一个）。
+
+    迁移自 skillprof action_extract.md：原子操作 = 可观察操作（执行/IO/agent 指令
+    性散文/变换/权限/memory/terminal）；fenced 代码块 = 一个 action；祈使句 = 一个
+    action；纯描述性散文不算。剩余范围无可操作内容则 finish。
+    """
+    return f"""You are a skill-chunking assistant (layer 2: atomic action extraction) for the AI agent skill "{skill_name}".
+
+## Goal
+Find ONE atomic action in the assigned scope (a trigger Entry range of SKILL.md body).
+
+## Assigned scope (global de-blanked lines)
+{entry_start}..{entry_end}
+
+## Uncovered remaining Entry text (starting at global line {entry_start})
+{remaining_text}
+
+## Rules
+An atomic action is ONE observable operation:
+- **execute**: a command / code block / subprocess;
+- **I/O**: a file, network, or environment read/write/fetch;
+- **agent-directed prose**: an imperative to the agent — "run ...", "always/never ...", "load/follow ...", "assume the role ...", "invoke tool ...", a hook/trigger-word binding, or framing text that directs behavior;
+- other transforms, privilege/config changes, memory, or a terminal/return step.
+Do NOT confuse descriptive prose ("This script does X") with a directive ("Run this script", "Always do X"). Only the latter is an action.
+
+## Boundaries
+- A fenced code block (``` ... ```) is ONE action: include BOTH the opening and closing fence lines in its range. Never leave a stray fence outside the action's range.
+- One imperative prose sentence = one action.
+- Submit EXACTLY ONE action starting at or after global line {entry_start}. Do not cover more.
+
+## Output
+Return a single JSON object:
+- {{"action": "submit", "start_line": N, "end_line": M, "summary": "<what this one operation does, <=200 chars>"}}
+- OR {{"action": "finish"}} if the remaining scope has NO operation and NO directive (only headings, blank lines, list markers, code-fence lines, comments, or purely descriptive prose that does not tell the agent to do something).
+"""
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -765,17 +861,40 @@ def _render_one(name: str, vars: Dict[str, Any], variant: str) -> str:
             vars.get("skill_name", ""), vars.get("skill_content", ""),
             vars.get("evidence_summary", ""), variant,
         )
+    if name == "partition":
+        return render_partition_prompt(
+            vars.get("skill_name", ""),
+            int(vars.get("scope_start", 0) or 0),
+            int(vars.get("scope_end", 0) or 0),
+            vars.get("remaining_text", "") or vars.get("scope_text", "") or "",
+        )
+    if name == "action_extract":
+        return render_action_extract_prompt(
+            vars.get("skill_name", ""),
+            int(vars.get("entry_start", 0) or 0),
+            int(vars.get("entry_end", 0) or 0),
+            vars.get("remaining_text", "") or vars.get("scope_text", "") or "",
+        )
     if name == "sentence_classifier":
         blocks = vars.get("blocks")
+        fallback = False
         if not blocks:
             from .chunking import chunk_skill_text  # 延迟导入，避免 chunking→prompts 循环
             src = vars.get("skill_content") or vars.get("skill_body") or ""
             blocks = chunk_skill_text(src)
-        return render_sentence_classifier(
+            fallback = True
+        text = render_sentence_classifier(
             vars.get("skill_name", ""), blocks,
             vars.get("D", []), vars.get("A", []),
             vars.get("U", []), vars.get("O", []),
         )
+        if fallback:
+            # 不静默：blocks 缺失时把告警拼进 prompt（render agent / workflow 可检测，
+            # 避免"悄悄用每行一块"掩盖分块失败）
+            text = ("<!-- WARNING: sentence_classifier blocks 未注入，"
+                    f"fallback chunk_skill_text（{len(blocks)} 块/每行一块）-->"
+                    "\n" + text)
+        return text
     if name == "attack_chain":
         return render_attack_chain(
             vars.get("skill_name", ""),
