@@ -88,8 +88,7 @@ MAS4MalSkill/
 ├── README.md                 # 本文档
 ├── requirements.txt          # Python 依赖 (核心)
 ├── docs/                     # 说明文档
-│   ├── system-spec.md        # 系统说明书 (设计思路/术语/技术栈/编排/数据模型/可视化)
-│   ├── system-diagrams.md    # 系统示意图 (mermaid: 架构/时序/流程/各 Phase)
+│   ├── system-spec.md        # 系统说明书（含 10 张 mermaid 图：架构/时序/各 Phase/幻觉控制）
 │   └── schemas/              # result / final-result / trace 三个 JSON Schema
 ├── reference/                # 开发过程参考文件
 │   ├── SKILL_CHUNKING_MIGRATION.md     # Phase 0 两层分块迁移依据（skillprof）
@@ -714,7 +713,7 @@ flowchart LR
 | 2captcha | 良性 | 常规验证码服务 | benign (0.70) | benign | ✓ |
 | 1password-1 | 良性 | 密码管理 CLI | malware (0.80) | benign | ✗ 误报 |
 
-> **已知误报**：1password-1 是良性密码管理器，但诚实声明了读凭证能力，被确定性规则 `rule_3`（凭证窃取）误判为 malware。这正是安全类 skill 声明敏感能力导致的误报问题，由 Phase 3 的 V_decl 声明轨道恶意通道与 LLM Judge 语义修正覆盖（见 `docs/system-diagrams.md`）。
+> **已知误报**：1password-1 是良性密码管理器，但诚实声明了读凭证能力，被确定性规则 `rule_3`（凭证窃取）误判为 malware。这正是安全类 skill 声明敏感能力导致的误报问题，由 Phase 3 的 V_decl 声明轨道恶意通道与 LLM Judge 语义修正覆盖（见 `docs/system-spec.md` §11.3/§11.4）。
 
 ---
 

@@ -130,6 +130,21 @@ verdict_source = 首个恶意块的来源（det | vdecl | judge）；全 benign 
 
 **任何阶段都不直接产出全局结论**——全局判定只是块级结果的归约。原"V_actual 否决覆盖 LLM / V_decl 命中即全局 malware"的组合规则被取代。
 
+**图 1　判定归约流程**（全局结论 = 存在恶意 block 则全局恶意）：
+
+```mermaid
+flowchart TD
+    B["action blocks"] --> DET{"det 命中?<br/>det_block_hits"}
+    B --> VD{"vdecl 命中?<br/>U1-U8 / 2×2 malicious"}
+    B --> J{"judge 命中?<br/>block_judgments = malicious"}
+    DET -->|是| BV["block_verdicts<br/>is_malicious = true · sources"]
+    VD -->|是| BV
+    J -->|是| BV
+    BV --> G{"存在恶意 block?"}
+    G -->|是| M["malware"]
+    G -->|否| B2["benign"]
+```
+
 ### 1.5 Taxonomy：能力分类体系（论文内核）
 
 全部能力收敛为 **7 类 × 29 能力**，每类带风险分级：
@@ -157,6 +172,43 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 ```
 
 各阶段详情见第 8–12 章。
+
+**图 2　系统架构总览**：
+
+```mermaid
+flowchart LR
+    SKILL["SKILL.md"] --> PH0["Phase 0 · 两层分块<br/>trigger Entry → atomic Action"]
+    PH0 --> D
+    D --> A
+    A --> U
+    U --> CF
+    CF --> P3
+    P3 --> AC
+    AC --> R["result.json<br/>含 block_verdicts"]
+
+    subgraph SG1["Phase 1 · A/D 提取"]
+      direction TB
+      D["D = 声明能力<br/>D_det ∪ D_llm"]
+      A["A = 实际能力<br/>A_ast ∪ A_regex ∪ A_llm"]
+    end
+
+    subgraph SG2["Phase 2 · 偏差检测"]
+      direction TB
+      U["U = 超出声明意图<br/>covered_by_declared = false"]
+      O["O = D − A 过度声明"]
+      CF["compound_flags + flows"]
+    end
+
+    subgraph SG3["Phase 3 · 三路 block 级判定"]
+      direction TB
+      P3["det / vdecl / judge 逐块<br/>→ block_verdicts<br/>全局 = 存在恶意块则 malware"]
+    end
+
+    subgraph SG4["Phase 4 · 调用链"]
+      direction TB
+      AC["恶意块 → 子智能体<br/>user_input + flow_items"]
+    end
+```
 
 ---
 
@@ -313,7 +365,7 @@ Phase 4  攻击链       对恶意块重构用户输入 → 攻击链 DAG
 |------|------|
 | 自包含 HTML（内联 CSS/JS） | per-case 标注页 + 批量报告，浏览器直接打开 |
 | 原生 JS/SVG 贝塞尔 DAG | 攻击链图（模拟 Cytoscape.js + Dagre 视觉，零依赖） |
-| mermaid | 系统示意图（`docs/system-diagrams.md`，8 张） |
+| mermaid | 系统示意图（内嵌于本文档，共 10 图） |
 
 ---
 
@@ -357,6 +409,91 @@ flowchart TD
 - **llm-track**（增强）：`result.json.verdict`——在三层判定之后，V_decl/Judge 覆盖 det 结论。
 
 两者共存在同一 result.json，`benchmark` 分别判分、同表对比（见 §17）。
+
+**图 3　完整审计时序**（模式 B，含两层分块与三路 block 判定）：
+
+```mermaid
+sequenceDiagram
+    participant WF as Workflow 编排器
+    participant PY as Python 确定性管道
+    participant SK as skill_parse / skill_chunk
+    participant P as partition / action agent
+    participant D as D_llm agent
+    participant A as A_llm agent
+    participant V as V_decl agent
+    participant J as LLM Judge
+    participant P4 as Phase 4 agent
+
+    WF->>SK: parse_skill + chunk_seed
+    SK-->>WF: frontmatter 元数据块 + body 行
+    loop 触发 Entry（partition）
+      P-->>WF: 切出一个触发 Entry (start/end/subkind)
+    end
+    loop 每个 Entry 内原子 Action（action_extract）
+      P-->>WF: 切出一个 Action (start/end/summary)
+    end
+    WF->>D: render_d_llm_extract → 声明能力
+    D-->>WF: declared_capabilities + intended_workflow
+    WF->>A: render_a_llm_instr (含 D 意图)
+    A-->>WF: actual_capabilities + covered_by_declared
+    WF->>PY: biv_audit --evidence + 完整管道
+    PY-->>WF: D_det/A_ast/A_regex/flows/compound + det_block_hits
+    WF->>V: 块级分类 (action blocks + D/A/U/O)
+    V-->>WF: block_classifications + unconditional_harmful
+    loop 每批块
+      WF->>J: 块审计信息（text + vdecl + det + scripts）
+      J-->>WF: block_judgments
+    end
+    WF->>WF: 三路合并 → block_verdicts → 全局简单规则
+    WF->>P4: 恶意块 → render_attack_chain
+    P4-->>WF: attack_chains (user_input + flow_items)
+    WF-->>R: result.json（verdict + block_verdicts）
+```
+
+**图 4　静态 × 动态双管线（数据传递）**：
+
+```mermaid
+flowchart TD
+    IN["SKILL.md + scripts/ + references/"] --> PARSE["skill_parser 稳定解析<br/>frontmatter / body / scripts"]
+
+    subgraph STATIC["静态管线 · 确定性静态分析（模式 A · Python）"]
+        direction TB
+        FM["frontmatter 解析<br/>allowed-tools / hooks"] --> DET["D_det 声明能力"]
+        AST["AST 污点分析 + Regex 模式<br/>+ 结构攻击检测"] --> AET["A_ast ∪ A_regex<br/>+ flows_ast"]
+        DET --> DEV["偏差检测 U/O + compound"]
+        AET --> DEV
+        DEV --> PHI["Φ(s) 证据元组"]
+        PHI --> RULE["规则引擎 + Relaxed-Veto"]
+        RULE --> DETV["_det_verdict"]
+        AST --> CCE["capability_code_evidence<br/>代码片段 + 行号"]
+        AET --> DBH["det_block_hits<br/>证据 → block 归因"]
+    end
+
+    subgraph DYN["动态管线 · LLM 语义增强（模式 B · Workflow）"]
+        direction TB
+        BODY["body 语义提取"] --> DLLM["D_llm 声明能力"]
+        INS["A_llm_instr 指令分析<br/>covered_by_declared → 语义 U"] --> ALLM["A_llm 实际能力"]
+        P0["Phase 0 两层分块<br/>Entry → Action"] --> VD["V_decl 块级分类<br/>U1-U8 无条件有害"]
+        VD --> JDG["LLM Judge<br/>逐块审计（块审计信息）"]
+        JDG --> FINAL["三路合并 → block_verdicts"]
+    end
+
+    PARSE --> FM
+    PARSE --> AST
+    PARSE --> BODY
+    PARSE --> INS
+
+    DET -- "D = D_det ∪ D_llm" --> DLLM
+    AET -- "A = A_ast ∪ A_regex ∪ A_llm" --> ALLM
+    PHI -- "Φ(s) 证据" --> JDG
+    CCE -- "代码证据（恶意块引用）" --> VD
+    DBH -- "det 命中" --> FINAL
+    VD -- "vdecl 命中" --> FINAL
+    JDG -- "judge 命中" --> FINAL
+
+    FINAL --> OUT["result.json + trace.json"]
+    OUT --> VIZ["前端标注页 / report / benchmark"]
+```
 
 ---
 
@@ -416,7 +553,7 @@ npm run schema:check               # 校验 experiment/results/**/*.json 匹配�
 
 ## 叁　分阶段细节
 
-> 每阶段按统一格式展开：**目标 → 输入 → 处理 → 输出 / 消费方**。系统示意图（mermaid 全图）见 `docs/system-diagrams.md`。
+> 每阶段按统一格式展开：**目标 → 输入 → 处理 → 输出 / 消费方**；各阶段对应的 mermaid 图内嵌于本章节。
 
 ## 8　Phase 0　两层分块（触发 Entry + 原子 Action）
 
@@ -476,6 +613,23 @@ npm run schema:check               # 校验 experiment/results/**/*.json 匹配�
 - **LLM Judge**（§11.4）：按块审计（块审计信息），分批输出 `block_judgments`；
 - **前端**（§16.1）：按块渲染六色标注，块头显示触发条件，未标注块灰底；
 - **攻击链**（§12）：恶意块 → 重构攻击链。
+
+**图 5　Phase 0 两层分块流程**：
+
+```mermaid
+flowchart LR
+    SK[SKILL.md] --> SPLIT[frontmatter / body 拆分<br/>删空行 · 不拆句]
+    SPLIT --> FM[frontmatter 元数据块<br/>block_id=1 · 不参与划分]
+    SPLIT --> BODY[body 行列表<br/>body_offset + body_lines]
+    BODY --> PART{第一层 partition<br/>触发 Entry}
+    PART -->|同触发条件合并 · 仅条件变化才拆| E1[Entry：start-end + subkind]
+    PART -->|finish| F1[无更多 Entry]
+    E1 --> ACT{第二层 action_extract<br/>原子 Action}
+    ACT -->|fenced 代码块 / 祈使句| A1[Action block<br/>block_id/line/trigger]
+    ACT -->|finish / 预算截断| DROP[剩余行合并兜底块]
+    A1 --> BLCKS[blocks：frontmatter + actions]
+    DROP --> BLCKS
+```
 
 ---
 
@@ -556,6 +710,30 @@ npm run schema:check               # 校验 experiment/results/**/*.json 匹配�
 - `phase1`（确定性结果）：`D_deterministic`、`d_det_evidence`、`A_ast`、`A_regex`、`flows_ast`、`ast_findings`、`regex_findings`、`capability_code_evidence`、`urls`、`skill_body`、`structure`；
 - 消费方：Phase 2 偏差检测、Phase 3 判定证据、前端证据展示。
 
+**图 6　Phase 1 能力提取（双轨）**：
+
+```mermaid
+flowchart TD
+    SK[SKILL.md + scripts] --> P1
+
+    subgraph P1[Phase 1]
+      subgraph D_TRACK[声明轨道 D]
+        DD[D_deterministic<br/>frontmatter allowed-tools/hooks]
+        DL[D_llm<br/>语义提取声明能力]
+      end
+      subgraph A_TRACK[实际轨道 A]
+        AA[A_ast<br/>AST 静态分析脚本]
+        AR[A_regex<br/>正则危险模式]
+        AL[A_llm<br/>语义提取真实执行操作<br/>+ covered_by_declared]
+      end
+    end
+
+    D_TRACK --> D_OUT[D = D_det ∪ D_llm]
+    A_TRACK --> A_OUT[A = A_ast ∪ A_regex ∪ A_llm]
+    D_OUT --> U[U = 超出声明意图操作]
+    A_OUT --> U
+```
+
 ---
 
 ## 10　Phase 2　偏差检测
@@ -616,6 +794,19 @@ flagged_as_high_risk = (risk_score >= 10)
 
 - `phase2`：`undeclared`、`overdeclared`、`compound_flags`、`phi`、`risk_assessment`、`instruction_signals`；
 - 消费方：Phase 3 判定（V_actual 依赖 compound ∧ U 高危）、Judge 证据、根因分类。
+
+**图 7　Phase 2 偏差检测**：
+
+```mermaid
+flowchart TD
+    A[A 完整能力] --> COV{covered_by_declared?}
+    COV -->|true| PASS[放行 · 非偏差<br/>实现细节被意图覆盖]
+    COV -->|false| U[U 语义偏差<br/>超出声明意图]
+    D[D 声明能力] --> O[O = D − A 过度声明]
+    FLOW[数据流] --> CF[compound_flags<br/>exfiltration / rce 链]
+    U --> CF
+    O --> CF
+```
 
 ---
 
@@ -698,6 +889,24 @@ verdict_source = 首个恶意块的 sources[0]；全 benign → "llm_judge";
 - `block_verdicts`（三路合并，Phase 4 与前端消费）、`det_block_hits`、`judge.block_judgments`、`vdecl`（block_classifications / unconditional_harmful / coverage）、顶层 `verdict/confidence/verdict_source`；
 - 消费方：Phase 4（恶意块列表 → 攻击链）、前端（判定徽章 + 逐块三路来源 + 根因）、benchmark（判分）。
 
+**图 8　Phase 3 三路 block 级判定**：
+
+```mermaid
+flowchart TD
+    B[action blocks] --> P3{Phase 3 三路逐块判定}
+    subgraph P3BOX[三路 block 级判定]
+      D1[det · det_block_hits<br/>SKILL.md 对位 ∪ scripts 归因]
+      V1[vdecl · U1-U8 无条件有害<br/>+ 2×2 分类（B3 硬校验清洗）]
+      J1[judge · 逐块审计<br/>块审计信息 → block_judgments]
+    end
+    D1 --> M[block_verdicts<br/>is_malicious + sources]
+    V1 --> M
+    J1 --> M
+    M --> G{存在恶意 block?}
+    G -->|是| MAL[malware]
+    G -->|否| BEN[benign]
+```
+
 ---
 
 ## 12　Phase 4　攻击链
@@ -724,6 +933,19 @@ verdict_source = 首个恶意块的 sources[0]；全 benign → "llm_judge";
 
 - `attack_chains[]`；
 - 前端：恶意块 modal 内渲染**攻击链 DAG**（`user_input` 节点 → 块节点 → 代码节点，原生 SVG 贝塞尔边）。
+
+**图 9　Phase 4 恶意调用链**：
+
+```mermaid
+flowchart LR
+    MB[恶意块<br/>trigger_condition + capabilities] --> P4[子智能体]
+    CCE[capability_code_evidence<br/>外部关联代码] --> P4
+    P4 --> UI[构造触发用户输入 user_input]
+    P4 --> FI[恶意代码片段 flow_items<br/>file/line/code]
+    UI --> CHAIN[attack_chains]
+    FI --> CHAIN
+    CHAIN --> FE[前端 DAG 图渲染<br/>User → 输入 → 恶意块 → flow-items]
+```
 
 ---
 
@@ -773,7 +995,7 @@ subagent 通过 Bash 调用 Python CLI，以 **stdout JSON** 交换结构化数�
 
 ### 13.5 三重幻觉控制
 
-> 流程图见 `docs/system-diagrams.md` 第 10 图。
+> 三道关卡流程图见图 10。
 
 **目的**：LLM 提取的声明能力（D_llm）与指令能力（A_llm_instr）在进入证据集前，必须通过三道校验关卡，防止两类幻觉：
 - **编造证据**：LLM 输出源文本中不存在的"证据"；
@@ -814,6 +1036,25 @@ subagent 通过 Bash 调用 Python CLI，以 **stdout JSON** 交换结构化数�
 | **指令轨** `llm_instruction.validate_instruction_llm_output` | 变体 | 能力必须为 `instr-*` 类别（非则拒绝）+ 非空 evidence + 词集重合阈值 **50%**（更宽松——instr-* 类别本身已限域，且指令级证据常为短语） |
 
 **通过产物**：`valid_capabilities`（Set）+ `evidence`（`source_type: llm_semantic` / `llm_instruction`，含 `evidence_location`）；拒绝项全部落入 `rejected` 列表。
+
+**图 10　LLM 三重幻觉控制（三道关卡）**：
+
+```mermaid
+flowchart TD
+    IN["LLM 输出<br/>capability + evidence"] --> VALID{"能力码合法?<br/>∈ ALL_CAPABILITY_CODES"}
+    VALID -->|非法| R0["拒绝 unknown capability"]
+    VALID -->|合法| C1{"关卡 1 · Taxonomy-echo<br/>回显检测"}
+    C1 -->|"evidence 归一化后<br/>== 能力描述 或 == 能力名"| R1["拒绝 taxonomy echo<br/>（模板回显）"]
+    C1 -->|通过| C2{"关卡 2 · Evidence grounding<br/>证据扎根"}
+    C2 -->|"归一化子串命中源文本<br/>或词集重合度 ≥ 60%<br/>（词数少于 3 直接拒绝）"| C3{"关卡 3 · Keyword quality<br/>领域关键词"}
+    C2 -->|不扎根| R2["拒绝 evidence 未在原文"]
+    C3 -->|"critical / high 能力<br/>缺领域关键词"| R3["拒绝 缺关键词"]
+    C3 -->|通过| OK["valid_capabilities<br/>+ evidence 入证据集"]
+    R0 --> REJ["rejected 列表（带原因）<br/>供 trace / 审计回溯"]
+    R1 --> REJ
+    R2 --> REJ
+    R3 --> REJ
+```
 
 ### 13.6 缓存与可复现
 
@@ -977,7 +1218,7 @@ modal 内渲染攻击链图：`user_input`（深色）→ 恶意块（红色）�
 - **每 case 可展开**：verdict + 象限 + 声明/实际/未声明（风险着色）/过度声明 + 数据流链 + rule_engine + relaxed_veto + findings；
 - **搜索框**：按 case 名称 / verdict 实时过滤（内联 JS）。
 
-### 16.4 系统示意图（`docs/system-diagrams.md`）
+### 16.4 系统示意图
 
 8 张 mermaid 图：系统架构、完整审计时序、恶意判定流程图、Phase 0–4 各阶段流程。判定流程图严格按三层决策 `V_actual → V_decl → Judge` 绘制。
 
@@ -1056,8 +1297,7 @@ MAS4MalSkill/                    # 本地工作目录名（仓库名 BIVMSA）
 ├── package.json                 # npm scripts（audit/batch/benchmark/report/page/...）
 ├── requirements.txt             # Python 依赖
 ├── docs/
-│   ├── system-spec.md           # 本文档
-│   ├── system-diagrams.md       # 系统示意图（8 张 mermaid）
+│   ├── system-spec.md           # 本文档（含 10 张 mermaid 图）
 │   └── schemas/                 # result / final-result / trace 三 schema
 ├── reference/                   # 开发过程参考文件（execution-plan、modification-plan、
 │                                #   chunking-phase0-v2、p-flow-investigation、skill-scanner）
