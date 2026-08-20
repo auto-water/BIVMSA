@@ -425,9 +425,9 @@ OR {"action": "finish"} if the remaining scope has NO operation and NO directive
     // ---- Phase 0 截断预算 ----
     // 防止对超大 body 逐块切造成 agent 调用风暴（后端慢时 40+ 次串行调用极慢）。
     // 达到预算即停止细粒度切分，剩余未覆盖行合并为一个兜底块。
-    const PHASE0_MAX_AGENTS = 40;       // partition + action 总 agent 预算
-    const MAX_ACTIONS_PER_ENTRY = 30;   // 每 Entry 内 action 上限
-    const MAX_TOTAL_BLOCKS = 60;        // 总块数上限（含 frontmatter）
+    const PHASE0_MAX_AGENTS = 20;       // partition + action 总 agent 预算
+    const MAX_ACTIONS_PER_ENTRY = 15;   // 每 Entry 内 action 上限
+    const MAX_TOTAL_BLOCKS = 35;        // 总块数上限（含 frontmatter）
     let phase0Agents = 0;
 
     const entries = [];
